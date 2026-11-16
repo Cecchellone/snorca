@@ -903,6 +903,98 @@ TEST_CASE("Automatic wall dithering phase shifts the layer cadence per wall", "[
     CHECK_FALSE(MixedFilamentManager::uses_wall_dithering(row));
 }
 
+TEST_CASE("MWD resolves top, body and bottom sections per feature", "[MixedFilament][WallDithering][MWD]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FF8000", "#FFFFFF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament &row = mgr.mixed_filaments().front();
+    row.component_a    = 1;
+    row.component_b    = 2;
+    row.wall_dithering = true;
+    // Body: outer wall column "23", inner wall column "2" (outermost first).
+    row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("23,2");
+    // Top rows (topmost first): surface/outer.
+    row.mwd_top    = MixedFilamentManager::encode_shell_rows({{3, 3}, {2, 3}});
+    // Bottom rows (first layer first).
+    row.mwd_bottom = MixedFilamentManager::encode_shell_rows({{1, 2}});
+    REQUIRE(MixedFilamentManager::uses_wall_dithering(row));
+
+    const unsigned int id = 4;
+    MixedFeatureContext ctx;
+    ctx.wall_loops         = 2;
+    ctx.top_layers         = 3; // one more than defined: repeats the deepest row
+    ctx.bottom_layers      = 1;
+    ctx.object_layer_count = 10;
+    const int surface = MixedFilamentManager::k_surface_feature;
+
+    // Bottom layer 0.
+    CHECK(mgr.resolve_feature(id, 3, 0, 0, 0.f, 0.f, ctx) == 2);
+    CHECK(mgr.resolve_feature(id, 3, 0, 1, 0.f, 0.f, ctx) == 1);
+    CHECK(mgr.resolve_feature(id, 3, 0, surface, 0.f, 0.f, ctx) == 1);
+
+    // Body starts right after the bottom section: layer 1 is body row 0.
+    CHECK(mgr.resolve_feature(id, 3, 1, 0, 0.f, 0.f, ctx) == 2);
+    CHECK(mgr.resolve_feature(id, 3, 2, 0, 0.f, 0.f, ctx) == 3);
+    CHECK(mgr.resolve_feature(id, 3, 1, 1, 0.f, 0.f, ctx) == 2);
+    // Infill follows the innermost wall in the body.
+    CHECK(mgr.resolve_feature(id, 3, 2, surface, 0.f, 0.f, ctx) == 2);
+
+    // Top section: layer 9 = topmost row, 8 = second row, 7 = repeated deepest row.
+    CHECK(mgr.resolve_feature(id, 3, 9, 0, 0.f, 0.f, ctx) == 3);
+    CHECK(mgr.resolve_feature(id, 3, 9, surface, 0.f, 0.f, ctx) == 3);
+    CHECK(mgr.resolve_feature(id, 3, 8, 0, 0.f, 0.f, ctx) == 3);
+    CHECK(mgr.resolve_feature(id, 3, 8, 1, 0.f, 0.f, ctx) == 2);
+    CHECK(mgr.resolve_feature(id, 3, 8, surface, 0.f, 0.f, ctx) == 2);
+    CHECK(mgr.resolve_feature(id, 3, 7, surface, 0.f, 0.f, ctx) == 2);
+    // Layer 6 is back in the body.
+    CHECK(mgr.resolve_feature(id, 3, 6, surface, 0.f, 0.f, ctx) == 2);
+
+    // Fewer top layers configured: the extra row is remembered but unused.
+    ctx.top_layers = 1;
+    CHECK(mgr.resolve_feature(id, 3, 8, surface, 0.f, 0.f, ctx) == 2);
+    CHECK(mgr.resolve_feature(id, 3, 8, 0, 0.f, 0.f, ctx) == mgr.resolve_feature(id, 3, 8, 0, 0.f, 0.f, MixedFeatureContext{2, 0, 1, 10}));
+
+    // Tool ordering sees every wall extruder of the layer.
+    ctx.top_layers = 3;
+    const std::vector<unsigned int> bottom_tools = mgr.ordered_feature_extruders(id, 3, 0, 0.f, 0.f, ctx);
+    REQUIRE(bottom_tools.size() == 2);
+    CHECK(bottom_tools[0] == 2);
+    CHECK(bottom_tools[1] == 1);
+}
+
+TEST_CASE("MWD shell rows round-trip and follow physical filament removal", "[MixedFilament][MWD]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FF8000", "#FFFFFF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament &row = mgr.mixed_filaments().front();
+    row.wall_dithering = true;
+    row.ui_mode        = 4;
+    row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("12,2");
+    row.mwd_top        = "2-2.1-2";
+    row.mwd_bottom     = "3-2";
+
+    MixedFilamentManager loaded;
+    loaded.load_custom_entries(mgr.serialize_custom_entries(), colors);
+    REQUIRE(loaded.mixed_filaments().size() == 1);
+    const MixedFilament &l = loaded.mixed_filaments().front();
+    CHECK(l.mwd_top == "2-2.1-2");
+    CHECK(l.mwd_bottom == "3-2");
+    CHECK(l.ui_mode == 4);
+    CHECK(l.wall_dithering);
+
+    // Filament 3 only appears in the bottom rows: it must count as used.
+    std::vector<int> ids = {4};
+    loaded.expand_virtual_extruder_ids(ids, 3);
+    CHECK(std::find(ids.begin(), ids.end(), 3) != ids.end());
+
+    // Removing filament 3 drops the row (it references the deleted filament).
+    MixedFilamentManager removal = loaded;
+    removal.remove_physical_filament(3);
+    CHECK(removal.mixed_filaments().empty());
+}
+
 TEST_CASE("Local-Z plans follow repeated object and part filament changes", "[MixedFilament][LocalZ][Invalidation]")
 {
     Model        model;

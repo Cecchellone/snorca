@@ -158,7 +158,13 @@ MixedFilamentDialog::MixedFilamentDialog(wxWindow* parent,
 {
     // Use saved UI mode when available (new format with cm token).
     // Fall back to heuristics for legacy rows without cm token.
-    if (existing.ui_mode >= 0 && existing.ui_mode <= 3) {
+    const bool grouped_pattern =
+        MixedFilamentManager::normalize_manual_pattern(existing.manual_pattern).find(',') != std::string::npos;
+    if (existing.ui_mode == MODE_MWD ||
+        ((existing.ui_mode == MODE_CYCLE || existing.ui_mode < 0) && grouped_pattern)) {
+        // Grouped (per-wall) patterns are edited in the dedicated MWD mode.
+        m_current_mode = MODE_MWD;
+    } else if (existing.ui_mode >= 0 && existing.ui_mode <= 3) {
         m_current_mode = existing.ui_mode;
     } else if (existing.gradient_enabled) {
         m_current_mode = MODE_GRADIENT;
@@ -270,7 +276,7 @@ void MixedFilamentDialog::build_ui()
         m_mode_btn_container->SetBackgroundColor(
             StateColor(std::pair(wxColour("#F8F7F7"), (int)StateColor::Normal)));
         auto* mode_sizer = new wxBoxSizer(wxHORIZONTAL);
-        const std::vector<wxString> mode_names = { _L("Ratio"), _L("Cycle"), _L("Match"), _L("Gradient") };
+        const std::vector<wxString> mode_names = { _L("Ratio"), _L("Cycle"), _L("Match"), _L("Gradient"), _L("MWD") };
 
         // Unselected: transparent (no bg) — container's #F8F7F7 shows through
         auto seg_bg  = StateColor();
@@ -278,9 +284,11 @@ void MixedFilamentDialog::build_ui()
         auto sel_bg  = StateColor(std::pair(wxColour("#009688"), (int)StateColor::Normal));
         auto sel_fg  = StateColor(std::pair(wxColour("#FEFEFE"), (int)StateColor::Normal));
 
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < (int)mode_names.size(); ++i) {
             auto* btn = new Button(m_mode_btn_container, mode_names[i]);
-            btn->SetMinSize(wxSize(FromDIP(80), FromDIP(28)));
+            btn->SetMinSize(wxSize(FromDIP(60), FromDIP(28)));
+            if (i == MODE_MWD)
+                btn->SetToolTip(_L("Multiple Wall Dithering: a different filament for every wall, plus dedicated top and bottom patterns."));
             btn->SetPaddingSize(wxSize(FromDIP(6), FromDIP(2)));
             btn->SetCornerRadius(FromDIP(4));
             btn->SetBorderWidth(0);
@@ -1041,7 +1049,6 @@ void MixedFilamentDialog::build_ui()
             input_wrapper->SetMinSize(wxSize(FromDIP(293), FromDIP(30)));
             wrapper_sizer->Add(m_pattern_ctrl, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(1));
             input_wrapper->SetSizer(wrapper_sizer);
-            m_pattern_input_wrapper = input_wrapper;
             m_pattern_ctrl->SetToolTip(_L("Allowed Input: Only digits, square brackets ([ and ]), and commas (,)."));
             m_pattern_ctrl->SetMaxLength(512);
 
@@ -1124,8 +1131,11 @@ void MixedFilamentDialog::build_ui()
         scroll_sizer->Add(m_cycle_card, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
     }
 
-    // ======== Card: Wall dithering (all modes) ========
+    // ======== Card: Wall dithering (automatic, Ratio / Match) ========
     build_wall_dithering_card(scroll_sizer);
+
+    // ======== Card: MWD (Multiple Wall Dithering) ========
+    build_mwd_card(scroll_sizer);
 
     // ======== Card C: Recommended Swatches ========
     {
@@ -2079,12 +2089,13 @@ void MixedFilamentDialog::update_ratio_or_tri_visibility()
     bool is_cycle_mode = (m_current_mode == MODE_CYCLE);
     bool is_match_mode = (m_current_mode == MODE_MATCH);
     bool is_gradient_mode = (m_current_mode == MODE_GRADIENT);
+    bool is_mwd_mode   = (m_current_mode == MODE_MWD);
     int  n             = (int)m_filament_rows.size();
     bool show_slider   = is_ratio_mode && (n == 2);
     bool show_tri      = is_ratio_mode && (n == 3);
 
     // Card A: Filament Selection card
-    bool show_filament_rows = !is_match_mode && !is_cycle_mode;
+    bool show_filament_rows = !is_match_mode && !is_cycle_mode && !is_mwd_mode;
     if (m_filament_card)      m_filament_card->Show(show_filament_rows);
     if (m_filament_rows_panel) m_filament_rows_panel->Show(show_filament_rows);
 
@@ -2119,17 +2130,19 @@ void MixedFilamentDialog::update_ratio_or_tri_visibility()
 
     // Cycle card
     if (m_cycle_card) m_cycle_card->Show(is_cycle_mode);
+    if (m_mwd_card)   m_mwd_card->Show(is_mwd_mode);
+    if (m_wall_card)  m_wall_card->Show(is_ratio_mode || is_match_mode || is_gradient_mode);
 
     // Match panel UI: never shown (backend only)
     if (m_match_panel_sizer) m_match_panel_sizer->ShowItems(false);
 
     // Card C: Swatches card
-    bool show_swatches = !is_cycle_mode;
+    bool show_swatches = !is_cycle_mode && !is_mwd_mode;
     if (m_swatch_card) m_swatch_card->Show(show_swatches);
 
     // Update add/remove button visibility
-    bool can_remove = !is_match_mode && !is_gradient_mode && !is_cycle_mode && (n > 2);
-    bool show_add = !is_match_mode && !is_gradient_mode && !is_cycle_mode && n < max_filaments_for_mode(m_current_mode);
+    bool can_remove = !is_match_mode && !is_gradient_mode && !is_cycle_mode && !is_mwd_mode && (n > 2);
+    bool show_add = !is_match_mode && !is_gradient_mode && !is_cycle_mode && !is_mwd_mode && n < max_filaments_for_mode(m_current_mode);
     bool can_add = n < (int)m_filament_colours.size();
     if (m_btn_remove_filament) m_btn_remove_filament->Show(can_remove);
     if (m_btn_add_filament) {
@@ -2210,7 +2223,7 @@ void MixedFilamentDialog::sync_rows_to_result()
 void MixedFilamentDialog::update_compatibility_warning()
 {
     // Recipe changed: the automatic wall dithering preview depends on it.
-    if (m_wall_grid_panel && m_current_mode != MODE_CYCLE && wall_dithering_active())
+    if (m_wall_grid_panel && wall_dithering_active())
         m_wall_grid_panel->Refresh();
 
     if (!m_error_panel || !m_error_text || !m_warning_panel || !m_warning_text || !m_btn_confirm)
@@ -2233,6 +2246,10 @@ void MixedFilamentDialog::update_compatibility_warning()
             for (int idx : m_match_tri_indices)
                 fids.push_back((unsigned int)idx);
         }
+    } else if (m_current_mode == MODE_MWD) {
+        for (unsigned int id : mwd_used_filaments())
+            if (id >= 1 && std::find(fids.begin(), fids.end(), id - 1) == fids.end())
+                fids.push_back(id - 1);
     } else if (m_current_mode == MODE_CYCLE && m_pattern_ctrl) {
         sync_rows_to_result();
         const std::string raw = into_u8(m_pattern_ctrl->GetValue());
@@ -2368,6 +2385,7 @@ wxString MixedFilamentDialog::get_ratio_warning_msg()
         }
         break;
     case MODE_CYCLE:
+    case MODE_MWD:
         return wxEmptyString;
     }
 
@@ -2394,6 +2412,16 @@ wxString MixedFilamentDialog::get_ratio_warning_msg()
 std::string MixedFilamentDialog::compute_preview_color()
 {
     if (m_filament_colours.empty()) return "#808080";
+
+    // MWD: what is seen from outside is mostly the outer wall column.
+    if (m_current_mode == MODE_MWD && !m_wall_grid.empty() && !m_wall_grid.front().empty()) {
+        std::vector<wxColour> palette;
+        palette.reserve(m_filament_colours.size());
+        for (const auto& c : m_filament_colours)
+            palette.push_back(parse_mixed_color(c));
+        const wxColour result = blend_sequence_filament_mixer(palette, m_wall_grid.front());
+        return wxString::Format("#%02X%02X%02X", result.Red(), result.Green(), result.Blue()).ToStdString();
+    }
     if (m_filament_rows.empty() && m_current_mode != MODE_MATCH) return "#808080";
 
     // Match mode: compute from current tri/gradient weights (during drag or no recipe)
@@ -3071,19 +3099,19 @@ void MixedFilamentDialog::on_mode_changed(int mode_index)
             update_compatibility_warning();
     }
     if (mode_index == MODE_CYCLE && m_pattern_ctrl) {
-        if (wall_dithering_active()) {
-            ensure_wall_grid();
-            sync_wall_grid_to_pattern_ctrl();
-        } else {
-            // Wall dithering off: a plain cycle keeps only the outermost wall.
-            const std::string norm = MixedFilamentManager::normalize_manual_pattern(into_u8(m_pattern_ctrl->GetValue()));
-            if (norm.find(',') != std::string::npos) {
-                m_pattern_ctrl->ChangeValue(from_u8(MixedFilamentManager::split_pattern_groups(norm).front()));
-                validate_cycle_pattern();
-            }
+        // A plain cycle has a single column: keep only the outermost wall.
+        const std::string norm = MixedFilamentManager::normalize_manual_pattern(into_u8(m_pattern_ctrl->GetValue()));
+        if (norm.find(',') != std::string::npos) {
+            m_pattern_ctrl->ChangeValue(from_u8(MixedFilamentManager::split_pattern_groups(norm).front()));
+            validate_cycle_pattern();
         }
     }
+    if (mode_index == MODE_MWD) {
+        ensure_mwd_data();
+        update_compatibility_warning();
+    }
     update_wall_dithering_ui();
+    update_mwd_ui();
     Layout();
     if (IsShown()) Fit();
 }
@@ -3245,8 +3273,8 @@ void MixedFilamentDialog::validate_cycle_pattern()
         return;
     }
 
-    if (!wall_dithering_active() && normalized.find(',') != std::string::npos) {
-        set_error(_L("Comma separated wall groups require \"Wall dithering\" to be enabled."));
+    if (normalized.find(',') != std::string::npos) {
+        set_error(_L("Per-wall patterns (commas) are edited in the MWD mode."));
         return;
     }
 
@@ -3298,6 +3326,8 @@ void MixedFilamentDialog::update_preview()
     if (m_cycle_strip_panel)   m_cycle_strip_panel->Refresh();
     if (m_cycle_blend_panel)   m_cycle_blend_panel->Refresh();
     if (m_wall_grid_panel)     m_wall_grid_panel->Refresh();
+    if (m_mwd_grid_panel)      m_mwd_grid_panel->Refresh();
+    if (m_mwd_iso_panel)       m_mwd_iso_panel->Refresh();
     // Match mode widgets
     if (m_match_tri_picker)    m_match_tri_picker->Refresh();
     if (m_match_strip_panel)   m_match_strip_panel->Refresh();
@@ -3471,55 +3501,82 @@ void MixedFilamentDialog::collect_result()
             m_result.local_z_max_sublayers = 2;
         break;
     }
-    // Wall dithering: Cycle mode stores its grid in manual_pattern (comma
-    // separated wall groups, outermost first); the other modes use the
-    // automatic per-wall phase shift. Z gradients do not support it.
-    m_result.wall_dithering       = wall_dithering_active();
+    // Wall dithering: MWD stores its wall grid in manual_pattern (comma
+    // separated wall groups, outermost first) plus top/bottom shell rows;
+    // Ratio / Match use the automatic per-wall phase shift.
+    if (m_current_mode == MODE_MWD) {
+        const MixedFilament mwd = build_mwd_row();
+        m_result.distribution_mode = int(MixedFilament::Simple);
+        m_result.component_a       = 1;
+        m_result.component_b       = 2;
+        m_result.manual_pattern    = mwd.manual_pattern;
+        m_result.mwd_top           = mwd.mwd_top;
+        m_result.mwd_bottom        = mwd.mwd_bottom;
+        m_result.gradient_component_ids.clear();
+        m_result.gradient_component_weights.clear();
+        m_result.wall_dithering    = true;
+        m_result.display_color     = compute_preview_color();
+    } else {
+        m_result.mwd_top.clear();
+        m_result.mwd_bottom.clear();
+        m_result.wall_dithering = wall_dithering_active();
+    }
     m_result.wall_dithering_shift = std::clamp(m_wall_shift, 1, 64);
     m_result.custom = true;
 }
 
 // ---------------------------------------------------------------------------
-// Wall dithering
+// Wall dithering (automatic) and MWD (Multiple Wall Dithering)
 // ---------------------------------------------------------------------------
 
 static constexpr int WALL_GRID_MAX_ROWS = 32;
 static constexpr int WALL_GRID_CELL     = 20;
+static constexpr int MWD_ROW_H          = 18;
+static constexpr int MWD_LABEL_W        = 58;
 
-int MixedFilamentDialog::read_configured_wall_count() const
+static int read_process_int(const char* key, int fallback)
 {
-    int walls = 2;
     try {
         if (PresetBundle* bundle = wxGetApp().preset_bundle) {
             const DynamicPrintConfig& cfg = bundle->prints.get_edited_preset().config;
-            if (cfg.has("wall_loops"))
-                walls = cfg.opt_int("wall_loops");
+            if (cfg.has(key))
+                return cfg.opt_int(key);
         }
     } catch (...) {
     }
-    return std::clamp(walls, 1, 16);
+    return fallback;
+}
+
+void MixedFilamentDialog::read_shell_config()
+{
+    m_wall_count    = std::clamp(read_process_int("wall_loops", 2), 1, 16);
+    m_top_layers    = std::clamp(read_process_int("top_shell_layers", 4), 0, 32);
+    m_bottom_layers = std::clamp(read_process_int("bottom_shell_layers", 3), 0, 32);
 }
 
 bool MixedFilamentDialog::wall_dithering_active() const
 {
-    return m_wall_dithering && m_current_mode != MODE_GRADIENT;
+    return m_wall_dithering && (m_current_mode == MODE_RATIO || m_current_mode == MODE_MATCH);
 }
 
 void MixedFilamentDialog::init_wall_dithering_from_result()
 {
-    m_wall_count     = read_configured_wall_count();
-    m_wall_dithering = m_result.wall_dithering;
+    read_shell_config();
+    m_wall_dithering = m_result.wall_dithering && m_current_mode != MODE_MWD;
     m_wall_shift     = std::clamp(m_result.wall_dithering_shift, 1, 16);
     m_wall_grid.clear();
+    m_mwd_top.clear();
+    m_mwd_bottom.clear();
 
-    if (m_current_mode != MODE_CYCLE)
+    if (m_current_mode != MODE_MWD)
         return;
-    const std::string norm = MixedFilamentManager::normalize_manual_pattern(m_result.manual_pattern);
-    if (norm.find(',') == std::string::npos)
-        return;
+
+    const size_t num_physical = m_filament_colours.size();
+    m_mwd_top    = MixedFilamentManager::decode_shell_rows(m_result.mwd_top, num_physical);
+    m_mwd_bottom = MixedFilamentManager::decode_shell_rows(m_result.mwd_bottom, num_physical);
 
     // Decode every wall group (outermost first) into physical ids.
-    const size_t num_physical = m_filament_colours.size();
+    const std::string norm = MixedFilamentManager::normalize_manual_pattern(m_result.manual_pattern);
     MixedFilament identity;
     identity.component_a = 1;
     identity.component_b = 2;
@@ -3548,7 +3605,6 @@ void MixedFilamentDialog::init_wall_dithering_from_result()
         }
     }
     if (rows == 0) {
-        rows = 0;
         for (const auto& c : columns)
             rows = std::max(rows, c.size());
         rows = std::min(rows, size_t(WALL_GRID_MAX_ROWS));
@@ -3562,35 +3618,30 @@ void MixedFilamentDialog::init_wall_dithering_from_result()
     m_wall_grid = std::move(columns);
 }
 
-void MixedFilamentDialog::ensure_wall_grid()
+void MixedFilamentDialog::ensure_mwd_data()
 {
+    const unsigned int n_phys = (unsigned int)std::max<size_t>(1, m_filament_colours.size());
     if (m_wall_grid.empty()) {
-        // Seed every wall with the current single-column cycle.
-        std::vector<unsigned int> seed;
-        if (m_pattern_ctrl) {
-            const size_t num_physical = m_filament_colours.size();
-            const std::string norm = MixedFilamentManager::normalize_manual_pattern(into_u8(m_pattern_ctrl->GetValue()));
-            MixedFilament identity;
-            identity.component_a = 1;
-            identity.component_b = 2;
-            const std::vector<std::string> groups = MixedFilamentManager::split_pattern_groups(norm);
-            if (!groups.empty()) {
-                for (const std::string& token : MixedFilamentManager::split_pattern_group_to_tokens(groups.front(), num_physical)) {
-                    const unsigned int id = MixedFilamentManager::physical_filament_from_token(token, identity, num_physical);
-                    if (id >= 1 && id <= num_physical)
-                        seed.push_back(id);
-                }
-            }
-        }
-        if (seed.empty())
-            seed = {1u, 2u};
-        if (seed.size() > size_t(WALL_GRID_MAX_ROWS))
-            seed.resize(WALL_GRID_MAX_ROWS);
-        m_wall_grid.assign(size_t(m_wall_count), seed);
+        // Default: alternate the first two filaments, shifted on every wall.
+        const unsigned int a = 1, b = std::min(2u, n_phys);
+        for (int w = 0; w < m_wall_count; ++w)
+            m_wall_grid.push_back((w % 2 == 0) ? std::vector<unsigned int>{ a, b } : std::vector<unsigned int>{ b, a });
     }
     // More walls than defined columns: repeat the deepest column.
     while ((int)m_wall_grid.size() < m_wall_count)
         m_wall_grid.push_back(m_wall_grid.back());
+
+    auto pad_rows = [](std::vector<MixedShellRow>& rows, int wanted, MixedShellRow seed) {
+        if (rows.empty() && wanted > 0)
+            rows.push_back(seed);
+        // Missing rows repeat the deepest defined row.
+        while ((int)rows.size() < wanted)
+            rows.push_back(rows.back());
+    };
+    const unsigned int outer0 = m_wall_grid.front().front();
+    pad_rows(m_mwd_top, m_top_layers, { outer0, outer0 });
+    pad_rows(m_mwd_bottom, m_bottom_layers, { outer0, outer0 });
+    m_mwd_brush = std::clamp(m_mwd_brush, 1u, n_phys);
 }
 
 void MixedFilamentDialog::resize_wall_rows(int rows)
@@ -3622,14 +3673,42 @@ std::string MixedFilamentDialog::wall_grid_to_pattern(size_t first_column, size_
     return out;
 }
 
-void MixedFilamentDialog::sync_wall_grid_to_pattern_ctrl()
+MixedFilament MixedFilamentDialog::build_mwd_row() const
 {
-    if (!m_pattern_ctrl || m_wall_grid.empty())
-        return;
-    // All columns are saved, including those beyond the current wall count,
-    // so that they come back if the wall count is increased again.
-    m_pattern_ctrl->ChangeValue(from_u8(wall_grid_to_pattern(0, m_wall_grid.size())));
-    validate_cycle_pattern();
+    MixedFilament row;
+    row.component_a    = 1;
+    row.component_b    = 2;
+    row.custom         = true;
+    row.enabled        = true;
+    row.wall_dithering = true;
+    row.ui_mode        = MODE_MWD;
+    // All columns / rows are saved, including those beyond the current
+    // process settings, so they come back if the counts are increased.
+    row.manual_pattern = MixedFilamentManager::normalize_manual_pattern(wall_grid_to_pattern(0, m_wall_grid.size()));
+    row.mwd_top        = MixedFilamentManager::encode_shell_rows(m_mwd_top);
+    row.mwd_bottom     = MixedFilamentManager::encode_shell_rows(m_mwd_bottom);
+    return row;
+}
+
+std::vector<unsigned int> MixedFilamentDialog::mwd_used_filaments() const
+{
+    std::vector<unsigned int> ids;
+    auto add = [&ids](unsigned int id) {
+        if (id >= 1 && std::find(ids.begin(), ids.end(), id) == ids.end())
+            ids.push_back(id);
+    };
+    for (int w = 0; w < (int)m_wall_grid.size() && w < m_wall_count; ++w)
+        for (unsigned int id : m_wall_grid[size_t(w)])
+            add(id);
+    for (int r = 0; r < (int)m_mwd_top.size() && r < m_top_layers; ++r) {
+        add(m_mwd_top[size_t(r)].first);
+        add(m_mwd_top[size_t(r)].second);
+    }
+    for (int r = 0; r < (int)m_mwd_bottom.size() && r < m_bottom_layers; ++r) {
+        add(m_mwd_bottom[size_t(r)].first);
+        add(m_mwd_bottom[size_t(r)].second);
+    }
+    return ids;
 }
 
 std::vector<std::vector<unsigned int>> MixedFilamentDialog::compute_auto_wall_preview(int rows)
@@ -3648,6 +3727,8 @@ std::vector<std::vector<unsigned int>> MixedFilamentDialog::compute_auto_wall_pr
     row.enabled              = true;
     row.deleted              = false;
     row.manual_pattern.clear();
+    row.mwd_top.clear();
+    row.mwd_bottom.clear();
     row.wall_dithering       = true;
     row.wall_dithering_shift = std::clamp(m_wall_shift, 1, 64);
 
@@ -3662,6 +3743,8 @@ std::vector<std::vector<unsigned int>> MixedFilamentDialog::compute_auto_wall_pr
                                                                false, nullptr, m_wall_count);
     return grid;
 }
+
+// ---- Automatic wall dithering card (Ratio / Match) ----
 
 void MixedFilamentDialog::build_wall_dithering_card(wxSizer* scroll_sizer)
 {
@@ -3690,10 +3773,9 @@ void MixedFilamentDialog::build_wall_dithering_card(wxSizer* scroll_sizer)
     m_wall_info->SetBackgroundColour(bg);
     m_wall_card_sizer->Add(m_wall_info, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
 
-    // Automatic modes: phase shift per wall
+    m_wall_auto_controls = new wxPanel(m_wall_card, wxID_ANY);
+    m_wall_auto_controls->SetBackgroundColour(bg);
     {
-        m_wall_auto_controls = new wxPanel(m_wall_card, wxID_ANY);
-        m_wall_auto_controls->SetBackgroundColour(bg);
         auto* row = new wxBoxSizer(wxHORIZONTAL);
         auto* lbl = new wxStaticText(m_wall_auto_controls, wxID_ANY, _L("Layer shift per wall"));
         lbl->SetFont(Label::Body_12);
@@ -3705,63 +3787,22 @@ void MixedFilamentDialog::build_wall_dithering_card(wxSizer* scroll_sizer)
         row->Add(lbl, 1, wxALIGN_CENTER_VERTICAL);
         row->Add(m_wall_shift_spin, 0, wxALIGN_CENTER_VERTICAL);
         m_wall_auto_controls->SetSizer(row);
-        m_wall_card_sizer->Add(m_wall_auto_controls, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
-        auto on_shift = [this](wxCommandEvent&) {
-            m_wall_shift = m_wall_shift_spin->GetValue();
-            refresh_wall_grid_panel();
-        };
-        m_wall_shift_spin->Bind(wxEVT_SPINCTRL, on_shift);
-        m_wall_shift_spin->Bind(wxEVT_TEXT, on_shift);
     }
+    m_wall_card_sizer->Add(m_wall_auto_controls, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+    auto on_shift = [this](wxCommandEvent&) {
+        m_wall_shift = m_wall_shift_spin->GetValue();
+        refresh_wall_grid_panel();
+    };
+    m_wall_shift_spin->Bind(wxEVT_SPINCTRL, on_shift);
+    m_wall_shift_spin->Bind(wxEVT_TEXT, on_shift);
 
-    // Cycle mode: layer rows +/-
-    {
-        m_wall_cycle_controls = new wxPanel(m_wall_card, wxID_ANY);
-        m_wall_cycle_controls->SetBackgroundColour(bg);
-        auto* row = new wxBoxSizer(wxHORIZONTAL);
-        m_wall_rows_label = new wxStaticText(m_wall_cycle_controls, wxID_ANY, wxEmptyString);
-        m_wall_rows_label->SetFont(Label::Body_12);
-        m_wall_rows_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
-        auto make_btn = [this](wxWindow* parent, const wxString& label) {
-            auto* b = new Button(parent, label);
-            b->SetMinSize(wxSize(FromDIP(28), FromDIP(24)));
-            b->SetCornerRadius(FromDIP(4));
-            b->SetBorderWidth(FromDIP(1));
-            b->SetBorderColorNormal(wxColour("#D1D5DC"));
-            b->SetBackgroundColorNormal(wxColour("#FFFFFF"));
-            b->SetTextColorNormal(wxColour("#242424"));
-            return b;
-        };
-        auto* btn_minus = make_btn(m_wall_cycle_controls, "-");
-        auto* btn_plus  = make_btn(m_wall_cycle_controls, "+");
-        btn_minus->SetToolTip(_L("Remove the top layer of the cycle"));
-        btn_plus->SetToolTip(_L("Add a layer to the cycle"));
-        row->Add(m_wall_rows_label, 1, wxALIGN_CENTER_VERTICAL);
-        row->Add(btn_minus, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
-        row->Add(btn_plus, 0, wxALIGN_CENTER_VERTICAL);
-        m_wall_cycle_controls->SetSizer(row);
-        m_wall_card_sizer->Add(m_wall_cycle_controls, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
-
-        auto change_rows = [this](int delta) {
-            ensure_wall_grid();
-            resize_wall_rows((int)m_wall_grid.front().size() + delta);
-            sync_wall_grid_to_pattern_ctrl();
-            update_wall_dithering_ui();
-        };
-        btn_minus->Bind(wxEVT_BUTTON, [change_rows](wxCommandEvent&) { change_rows(-1); });
-        btn_plus->Bind(wxEVT_BUTTON, [change_rows](wxCommandEvent&) { change_rows(+1); });
-    }
-
-    // Grid (columns: inner -> outer, rows: first layer at the bottom)
-    m_wall_grid_panel = new wxPanel(m_wall_card, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+    m_wall_grid_panel = new wxPanel(m_wall_card, wxID_ANY);
     m_wall_grid_panel->SetBackgroundColour(bg);
     m_wall_grid_panel->SetBackgroundStyle(wxBG_STYLE_PAINT);
     m_wall_grid_panel->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
         wxAutoBufferedPaintDC dc(m_wall_grid_panel);
         draw_wall_grid(dc);
     });
-    m_wall_grid_panel->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) { on_wall_grid_click(e.GetPosition(), false); });
-    m_wall_grid_panel->Bind(wxEVT_RIGHT_DOWN, [this](wxMouseEvent& e) { on_wall_grid_click(e.GetPosition(), true); });
     m_wall_card_sizer->Add(m_wall_grid_panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
     m_wall_card_sizer->AddSpacer(FromDIP(16));
 
@@ -3770,17 +3811,6 @@ void MixedFilamentDialog::build_wall_dithering_card(wxSizer* scroll_sizer)
 
     m_wall_check->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
         m_wall_dithering = m_wall_check->GetValue();
-        if (m_current_mode == MODE_CYCLE && m_pattern_ctrl) {
-            if (m_wall_dithering) {
-                ensure_wall_grid();
-                sync_wall_grid_to_pattern_ctrl();
-            } else if (!m_wall_grid.empty()) {
-                // Back to a plain cycle: keep the visible (outermost) wall.
-                // The grid stays in memory until the dialog is closed.
-                m_pattern_ctrl->ChangeValue(from_u8(wall_grid_to_pattern(0, 1)));
-                validate_cycle_pattern();
-            }
-        }
         update_wall_dithering_ui();
     });
 }
@@ -3789,30 +3819,19 @@ void MixedFilamentDialog::refresh_wall_grid_panel()
 {
     if (!m_wall_grid_panel)
         return;
-    int rows = 12;
-    if (m_current_mode == MODE_CYCLE && !m_wall_grid.empty())
-        rows = (int)m_wall_grid.front().size();
     const int cell = FromDIP(WALL_GRID_CELL);
-    const int label_h = FromDIP(16);
-    m_wall_grid_panel->SetMinSize(wxSize(-1, rows * cell + label_h + 1));
+    m_wall_grid_panel->SetMinSize(wxSize(-1, 12 * cell + FromDIP(16) + 1));
     m_wall_grid_panel->Refresh();
 }
 
 void MixedFilamentDialog::draw_wall_grid(wxDC& dc)
 {
-    const wxColour bg = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
-    dc.SetBackground(wxBrush(bg));
+    dc.SetBackground(wxBrush(StateColor::darkModeColorFor(wxColour("#FFFFFF"))));
     dc.Clear();
     if (!m_wall_grid_panel || !wall_dithering_active() || m_filament_colours.empty())
         return;
 
-    std::vector<std::vector<unsigned int>> grid;
-    if (m_current_mode == MODE_CYCLE) {
-        ensure_wall_grid();
-        grid.assign(m_wall_grid.begin(), m_wall_grid.begin() + std::min<size_t>(m_wall_grid.size(), size_t(m_wall_count)));
-    } else {
-        grid = compute_auto_wall_preview(12);
-    }
+    const std::vector<std::vector<unsigned int>> grid = compute_auto_wall_preview(12);
     if (grid.empty() || grid.front().empty())
         return;
 
@@ -3831,11 +3850,11 @@ void MixedFilamentDialog::draw_wall_grid(wxDC& dc)
     const wxString outer = _L("Outer");
     dc.DrawText(inner, std::max(0, x0 - dc.GetTextExtent(inner).x - FromDIP(6)), y0 + rows * cell - dc.GetCharHeight());
     dc.DrawText(outer, x0 + width + FromDIP(6), y0 + rows * cell - dc.GetCharHeight());
-
     for (int c = 0; c < cols; ++c) {
         // Display column c (left -> right) is wall (cols - 1 - c): rightmost = outermost.
         const int wall = cols - 1 - c;
         const wxString head = wxString::Format("%d", wall + 1);
+        dc.SetTextForeground(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
         dc.DrawText(head, x0 + c * cell + (cell - dc.GetTextExtent(head).x) / 2, 0);
         for (int r = 0; r < rows; ++r) {
             const unsigned int id  = grid[size_t(wall)][size_t(r)];
@@ -3846,42 +3865,8 @@ void MixedFilamentDialog::draw_wall_grid(wxDC& dc)
             dc.SetPen(wxPen(StateColor::darkModeColorFor(wxColour(200, 200, 200)), 1));
             dc.SetBrush(wxBrush(col));
             dc.DrawRectangle(x, y, cell + 1, cell + 1);
-            const wxString num = wxString::Format("%u", id);
-            const int lum = (col.Red() * 299 + col.Green() * 587 + col.Blue() * 114) / 1000;
-            dc.SetTextForeground(lum > 140 ? wxColour(36, 36, 36) : wxColour(255, 255, 255));
-            const wxSize te = dc.GetTextExtent(num);
-            dc.DrawText(num, x + (cell - te.x) / 2, y + (cell - te.y) / 2);
         }
-        dc.SetTextForeground(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
     }
-}
-
-void MixedFilamentDialog::on_wall_grid_click(const wxPoint& pt, bool backwards)
-{
-    if (m_current_mode != MODE_CYCLE || !wall_dithering_active() || !m_wall_grid_panel)
-        return;
-    ensure_wall_grid();
-    const int n_phys = (int)m_filament_colours.size();
-    if (n_phys < 1)
-        return;
-    const wxSize sz      = m_wall_grid_panel->GetClientSize();
-    const int    cell    = FromDIP(WALL_GRID_CELL);
-    const int    label_h = FromDIP(16);
-    const int    cols    = std::min((int)m_wall_grid.size(), m_wall_count);
-    const int    rows    = (int)m_wall_grid.front().size();
-    const int    x0      = std::max(0, (sz.x - cols * cell) / 2);
-    const int    c       = (pt.x - x0) / cell;
-    const int    rr      = (pt.y - label_h) / cell;
-    if (pt.x < x0 || pt.y < label_h || c < 0 || c >= cols || rr < 0 || rr >= rows)
-        return;
-    const int wall = cols - 1 - c;
-    const int row  = rows - 1 - rr;
-    unsigned int& id = m_wall_grid[size_t(wall)][size_t(row)];
-    int next = (int)id - 1 + (backwards ? -1 : 1);
-    next = ((next % n_phys) + n_phys) % n_phys;
-    id = unsigned(next + 1);
-    sync_wall_grid_to_pattern_ctrl();
-    m_wall_grid_panel->Refresh();
 }
 
 void MixedFilamentDialog::update_wall_dithering_ui()
@@ -3889,7 +3874,6 @@ void MixedFilamentDialog::update_wall_dithering_ui()
     if (!m_wall_card || !m_wall_check)
         return;
     const bool gradient = m_current_mode == MODE_GRADIENT;
-    const bool cycle    = m_current_mode == MODE_CYCLE;
     const bool on       = wall_dithering_active();
 
     m_wall_check->Enable(!gradient);
@@ -3899,11 +3883,7 @@ void MixedFilamentDialog::update_wall_dithering_ui()
     if (gradient)
         info = _L("Not available with Z gradients: they are produced by Local-Z sub-layers.");
     else if (!on)
-        info = _L("Print each wall of the layer with a different filament of the mix.");
-    else if (cycle)
-        info = wxString::Format(_L("Walls used: %d (process \"Wall loops\"). Right column = outermost wall, left = innermost; "
-                                   "bottom row = first layer of the cycle. Click a cell for the next filament, right-click for the previous one."),
-                                m_wall_count);
+        info = _L("Print each wall of the layer with a different filament of the mix. For a fully manual layout use the MWD mode.");
     else
         info = wxString::Format(_L("Walls used: %d (process \"Wall loops\"). The mix sequence is shifted automatically "
                                    "for every wall. Preview: right = outermost wall, bottom = first layer."),
@@ -3911,26 +3891,9 @@ void MixedFilamentDialog::update_wall_dithering_ui()
     m_wall_info->SetLabel(info);
     m_wall_info->Wrap(FromDIP(290));
 
-    if (cycle && on) {
-        ensure_wall_grid();
-        const int rows = (int)m_wall_grid.front().size();
-        wxString rows_text = wxString::Format(_L("Layers in cycle: %d"), rows);
-        if ((int)m_wall_grid.size() > m_wall_count)
-            rows_text += wxString::Format(_L("  (%d extra walls kept, unused)"), (int)m_wall_grid.size() - m_wall_count);
-        m_wall_rows_label->SetLabel(rows_text);
-    }
-
-    m_wall_auto_controls->Show(on && !cycle);
-    m_wall_cycle_controls->Show(on && cycle);
+    m_wall_auto_controls->Show(on);
     m_wall_grid_panel->Show(on);
-    if (m_pattern_input_wrapper)
-        m_pattern_input_wrapper->Show(!(cycle && on));
-    for (MixedFilamentBadge* badge : m_pattern_quick_buttons)
-        if (badge)
-            badge->Show(!(cycle && on));
-
     refresh_wall_grid_panel();
-    if (m_cycle_card) m_cycle_card->Layout();
     m_wall_card->Layout();
     m_wall_card->Refresh();
     if (m_scrolled_content) {
@@ -3938,6 +3901,479 @@ void MixedFilamentDialog::update_wall_dithering_ui()
         m_scrolled_content->FitInside();
     }
     Layout();
+}
+
+// ---- MWD card ----
+
+struct MixedFilamentDialog::MwdLayout
+{
+    int x0 = 0;          // left of the grid
+    int col_w = 0;       // width of one wall column
+    int cols = 0;        // displayed wall columns (= wall count)
+    int row_h = 0;
+    int top_y = 0;       // y of the top section (rows: topmost layer first)
+    int body_y = 0;      // y of the body section (rows: last cycle row first)
+    int repeat_y = 0;    // y of the repetition marker row
+    int bottom_y = 0;    // y of the bottom section (rows: last bottom row first)
+    int top_rows = 0, body_rows = 0, bottom_rows = 0;
+    int height = 0;
+    int grid_w() const { return cols * col_w; }
+};
+
+MixedFilamentDialog::MwdLayout MixedFilamentDialog::mwd_layout() const
+{
+    MwdLayout l;
+    const int width = m_mwd_grid_panel ? m_mwd_grid_panel->GetClientSize().x : FromDIP(290);
+    l.cols        = std::max(1, m_wall_count);
+    l.row_h       = FromDIP(MWD_ROW_H);
+    l.x0          = FromDIP(MWD_LABEL_W) + FromDIP(6);
+    const int avail = std::max(FromDIP(60), width - l.x0 - FromDIP(4));
+    l.col_w       = std::clamp(avail / l.cols, FromDIP(14), FromDIP(48));
+    l.top_rows    = m_top_layers;
+    l.body_rows   = m_wall_grid.empty() ? 0 : (int)m_wall_grid.front().size();
+    l.bottom_rows = m_bottom_layers;
+    const int gap = FromDIP(6);
+    int y = FromDIP(16); // column headers
+    l.top_y = y;
+    y += l.top_rows * l.row_h + (l.top_rows > 0 ? gap : 0);
+    l.body_y = y;
+    y += l.body_rows * l.row_h;
+    l.repeat_y = y;
+    y += l.row_h;
+    l.bottom_y = y;
+    y += l.bottom_rows * l.row_h;
+    l.height = y + FromDIP(2);
+    return l;
+}
+
+void MixedFilamentDialog::build_mwd_card(wxSizer* scroll_sizer)
+{
+    const wxColour bg = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
+    m_mwd_card = new StaticBox(m_scrolled_content, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    m_mwd_card->SetCornerRadius(FromDIP(4));
+    m_mwd_card->SetMinSize(wxSize(FromDIP(325), -1));
+    m_mwd_card->SetMaxSize(wxSize(FromDIP(325), -1));
+    m_mwd_card->SetBackgroundColor(StateColor(std::pair(wxColour("#FFFFFF"), (int)StateColor::Normal)));
+    m_mwd_card->SetBorderWidth(FromDIP(1));
+    m_mwd_card->SetBorderColorNormal(wxColour("#F0F0F0"));
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+    auto* title = new wxStaticText(m_mwd_card, wxID_ANY, _L("Filaments"));
+    title->SetFont(Label::Body_14);
+    title->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+    title->SetBackgroundColour(bg);
+    sizer->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+
+    // Available filaments with their numbers; clicking one selects the brush.
+    {
+        MixedFilamentDisplayContext ctx;
+        ctx.num_physical    = m_filament_colours.size();
+        ctx.physical_colors = m_filament_colours;
+        auto* btn_row = new wxWrapSizer(wxHORIZONTAL);
+        for (int fid = 0; fid < (int)m_filament_colours.size(); ++fid) {
+            MixedFilament mf;
+            mf.display_color = m_filament_colours[fid];
+            mf.custom        = true;
+            auto* badge = new MixedFilamentBadge(m_mwd_card, wxID_ANY, fid + 1, mf, ctx, true, 20);
+            badge->SetToolTip(wxString::Format(_L("Paint with filament %d"), fid + 1));
+            badge->Bind(wxEVT_BUTTON, [this, fid](wxCommandEvent&) {
+                m_mwd_brush = unsigned(fid + 1);
+                update_mwd_ui();
+            });
+            btn_row->Add(badge, 0, wxRIGHT | wxBOTTOM, FromDIP(8));
+        }
+        sizer->Add(btn_row, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+    }
+
+    // Brush indicator
+    {
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        m_mwd_brush_label = new wxStaticText(m_mwd_card, wxID_ANY, wxEmptyString);
+        m_mwd_brush_label->SetFont(Label::Body_12);
+        m_mwd_brush_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+        m_mwd_brush_label->SetBackgroundColour(bg);
+        m_mwd_brush_swatch = new wxPanel(m_mwd_card, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)));
+        row->Add(m_mwd_brush_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        row->Add(m_mwd_brush_swatch, 0, wxALIGN_CENTER_VERTICAL);
+        sizer->Add(row, 0, wxLEFT | wxRIGHT, FromDIP(16));
+    }
+
+    m_mwd_info = new wxStaticText(m_mwd_card, wxID_ANY, wxEmptyString);
+    m_mwd_info->SetFont(Label::Body_12);
+    m_mwd_info->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
+    m_mwd_info->SetBackgroundColour(bg);
+    sizer->Add(m_mwd_info, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+
+    // Wall cycle length controls
+    {
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        m_mwd_rows_label = new wxStaticText(m_mwd_card, wxID_ANY, wxEmptyString);
+        m_mwd_rows_label->SetFont(Label::Body_12);
+        m_mwd_rows_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+        m_mwd_rows_label->SetBackgroundColour(bg);
+        auto make_btn = [this](const wxString& label) {
+            auto* b = new Button(m_mwd_card, label);
+            b->SetMinSize(wxSize(FromDIP(28), FromDIP(24)));
+            b->SetCornerRadius(FromDIP(4));
+            b->SetBorderWidth(FromDIP(1));
+            b->SetBorderColorNormal(wxColour("#D1D5DC"));
+            b->SetBackgroundColorNormal(wxColour("#FFFFFF"));
+            b->SetTextColorNormal(wxColour("#242424"));
+            return b;
+        };
+        auto* btn_minus = make_btn("-");
+        auto* btn_plus  = make_btn("+");
+        btn_minus->SetToolTip(_L("Remove the top layer of the wall cycle"));
+        btn_plus->SetToolTip(_L("Add a layer to the wall cycle"));
+        row->Add(m_mwd_rows_label, 1, wxALIGN_CENTER_VERTICAL);
+        row->Add(btn_minus, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        row->Add(btn_plus, 0, wxALIGN_CENTER_VERTICAL);
+        sizer->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+        auto change_rows = [this](int delta) {
+            ensure_mwd_data();
+            resize_wall_rows((int)m_wall_grid.front().size() + delta);
+            update_mwd_ui();
+            update_compatibility_warning();
+        };
+        btn_minus->Bind(wxEVT_BUTTON, [change_rows](wxCommandEvent&) { change_rows(-1); });
+        btn_plus->Bind(wxEVT_BUTTON, [change_rows](wxCommandEvent&) { change_rows(+1); });
+    }
+
+    // Pattern grid
+    m_mwd_grid_panel = new wxPanel(m_mwd_card, wxID_ANY);
+    m_mwd_grid_panel->SetBackgroundColour(bg);
+    m_mwd_grid_panel->SetBackgroundStyle(wxBG_STYLE_PAINT);
+    m_mwd_grid_panel->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+        wxAutoBufferedPaintDC dc(m_mwd_grid_panel);
+        draw_mwd_grid(dc);
+    });
+    m_mwd_grid_panel->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) { on_mwd_grid_click(e.GetPosition(), false); });
+    m_mwd_grid_panel->Bind(wxEVT_RIGHT_DOWN, [this](wxMouseEvent& e) { on_mwd_grid_click(e.GetPosition(), true); });
+    m_mwd_grid_panel->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { m_mwd_grid_panel->Refresh(); e.Skip(); });
+    sizer->Add(m_mwd_grid_panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+
+    // Isometric preview
+    auto* iso_lbl = new wxStaticText(m_mwd_card, wxID_ANY, _L("Preview"));
+    iso_lbl->SetFont(Label::Body_12);
+    iso_lbl->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
+    iso_lbl->SetBackgroundColour(bg);
+    sizer->Add(iso_lbl, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+    m_mwd_iso_panel = new wxPanel(m_mwd_card, wxID_ANY, wxDefaultPosition, wxSize(-1, FromDIP(240)));
+    m_mwd_iso_panel->SetMinSize(wxSize(-1, FromDIP(240)));
+    m_mwd_iso_panel->SetBackgroundColour(bg);
+    m_mwd_iso_panel->SetBackgroundStyle(wxBG_STYLE_PAINT);
+    m_mwd_iso_panel->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+        wxAutoBufferedPaintDC dc(m_mwd_iso_panel);
+        draw_mwd_iso(dc);
+    });
+    m_mwd_iso_panel->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { m_mwd_iso_panel->Refresh(); e.Skip(); });
+    sizer->Add(m_mwd_iso_panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(4));
+    sizer->AddSpacer(FromDIP(16));
+
+    m_mwd_card->SetSizer(sizer);
+    scroll_sizer->Add(m_mwd_card, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+    if (m_current_mode == MODE_MWD)
+        ensure_mwd_data();
+}
+
+void MixedFilamentDialog::update_mwd_ui()
+{
+    if (!m_mwd_card)
+        return;
+    if (m_current_mode == MODE_MWD) {
+        ensure_mwd_data();
+        m_mwd_info->SetLabel(wxString::Format(
+            _L("Walls: %d, top layers: %d, bottom layers: %d (process settings). Right column = outer wall, "
+               "left = innermost. Click a cell to paint it with the selected filament, right-click for the next one."),
+            m_wall_count, m_top_layers, m_bottom_layers));
+        m_mwd_info->Wrap(FromDIP(290));
+        wxString rows_text = wxString::Format(_L("Layers in wall cycle: %d"), (int)m_wall_grid.front().size());
+        const int extra_walls = (int)m_wall_grid.size() - m_wall_count;
+        if (extra_walls > 0)
+            rows_text += wxString::Format(_L("  (%d extra walls kept, unused)"), extra_walls);
+        m_mwd_rows_label->SetLabel(rows_text);
+        m_mwd_brush_label->SetLabel(wxString::Format(_L("Selected filament: %u"), m_mwd_brush));
+        const int idx = std::clamp((int)m_mwd_brush - 1, 0, std::max(0, (int)m_filament_colours.size() - 1));
+        if (!m_filament_colours.empty())
+            m_mwd_brush_swatch->SetBackgroundColour(parse_mixed_color(m_filament_colours[size_t(idx)]));
+        m_mwd_brush_swatch->Refresh();
+        m_mwd_grid_panel->SetMinSize(wxSize(-1, mwd_layout().height));
+        m_mwd_grid_panel->Refresh();
+        m_mwd_iso_panel->Refresh();
+    }
+    m_mwd_card->Layout();
+    m_mwd_card->Refresh();
+    if (m_scrolled_content) {
+        m_scrolled_content->Layout();
+        m_scrolled_content->FitInside();
+    }
+    Layout();
+}
+
+void MixedFilamentDialog::draw_mwd_grid(wxDC& dc)
+{
+    dc.SetBackground(wxBrush(StateColor::darkModeColorFor(wxColour("#FFFFFF"))));
+    dc.Clear();
+    if (m_current_mode != MODE_MWD || m_filament_colours.empty())
+        return;
+    ensure_mwd_data();
+
+    const MwdLayout l   = mwd_layout();
+    const int       gw  = l.grid_w();
+    const wxColour  ink = StateColor::darkModeColorFor(wxColour("#242424"));
+    const wxColour  thin = StateColor::darkModeColorFor(wxColour(190, 190, 190));
+    dc.SetFont(Label::Body_10);
+
+    auto color_of = [this](unsigned int id) {
+        const int idx = std::clamp((int)id - 1, 0, (int)m_filament_colours.size() - 1);
+        return parse_mixed_color(m_filament_colours[size_t(idx)]);
+    };
+    auto cell = [&](int x, int y, int w, unsigned int id) {
+        const wxColour col = color_of(id);
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(col));
+        dc.DrawRectangle(x, y, w, l.row_h);
+        const int lum = (col.Red() * 299 + col.Green() * 587 + col.Blue() * 114) / 1000;
+        dc.SetTextForeground(lum > 140 ? wxColour(36, 36, 36) : wxColour(255, 255, 255));
+        const wxString num = wxString::Format("%u", id);
+        const wxSize   te  = dc.GetTextExtent(num);
+        dc.DrawText(num, x + (w - te.x) / 2, y + (l.row_h - te.y) / 2);
+    };
+    auto section_label = [&](int y, int rows, const wxColour& c, const wxString& text) {
+        if (rows <= 0)
+            return;
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(c));
+        dc.DrawRectangle(0, y, FromDIP(MWD_LABEL_W), rows * l.row_h);
+        dc.SetTextForeground(*wxWHITE);
+        const wxSize te = dc.GetTextExtent(text);
+        dc.DrawText(text, std::max(FromDIP(2), (FromDIP(MWD_LABEL_W) - te.x) / 2), y + (rows * l.row_h - te.y) / 2);
+    };
+    auto frame = [&](int y, int rows) {
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.SetPen(wxPen(ink, FromDIP(2)));
+        dc.DrawRectangle(l.x0, y, gw + 1, rows * l.row_h + 1);
+    };
+    auto hline = [&](int y, int x_from, int x_to, int style) {
+        dc.SetPen(wxPen(thin, 1, (wxPenStyle)style));
+        dc.DrawLine(x_from, y, x_to, y);
+    };
+    const int outer_x   = l.x0 + (l.cols - 1) * l.col_w; // rightmost column = outer wall
+    const int surface_w = (l.cols >= 2) ? (l.cols - 1) * l.col_w : l.col_w / 2;
+    const int outer_w   = (l.cols >= 2) ? l.col_w : l.col_w - surface_w;
+    const int outer_cx  = (l.cols >= 2) ? outer_x : l.x0 + surface_w;
+
+    // Column headers: wall number (1 = outer)
+    dc.SetTextForeground(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
+    for (int c = 0; c < l.cols; ++c) {
+        const wxString head = (c == l.cols - 1) ? _L("Outer") : wxString::Format("%d", l.cols - c);
+        const wxSize te = dc.GetTextExtent(head);
+        dc.DrawText(head, l.x0 + c * l.col_w + (l.col_w - te.x) / 2, 0);
+    }
+
+    // ---- Top section: row 0 = topmost layer ----
+    for (int r = 0; r < l.top_rows; ++r) {
+        const MixedShellRow row = m_mwd_top[size_t(r)];
+        const int y = l.top_y + r * l.row_h;
+        cell(l.x0, y, surface_w, row.first);
+        cell(outer_cx, y, outer_w, row.second);
+        if (r > 0) {
+            hline(y, l.x0, l.x0 + surface_w, wxPENSTYLE_SOLID);
+            hline(y, outer_cx, outer_cx + outer_w, wxPENSTYLE_DOT);
+        }
+    }
+    section_label(l.top_y, l.top_rows, wxColour("#1A9BD7"), _CTX(L_CONTEXT("Top", "Layers"), "Layers"));
+
+    // ---- Body: last cycle row at the top, first at the bottom ----
+    for (int r = 0; r < l.body_rows; ++r) {
+        const int y = l.body_y + (l.body_rows - 1 - r) * l.row_h;
+        for (int c = 0; c < l.cols; ++c) {
+            const int wall = l.cols - 1 - c;
+            cell(l.x0 + c * l.col_w, y, l.col_w, m_wall_grid[size_t(wall)][size_t(r)]);
+        }
+        if (r < l.body_rows - 1)
+            hline(y, l.x0, l.x0 + gw, wxPENSTYLE_SOLID);
+    }
+    // Thin separators between inner wall columns.
+    dc.SetPen(wxPen(ink, 1));
+    for (int c = 1; c < l.cols - 1; ++c)
+        dc.DrawLine(l.x0 + c * l.col_w, l.body_y, l.x0 + c * l.col_w, l.body_y + l.body_rows * l.row_h);
+    section_label(l.body_y, l.body_rows, wxColour("#4CAF50"), _L("Walls"));
+
+    // ---- Repetition marker: the wall cycle repeats over the object height ----
+    {
+        dc.SetPen(wxPen(StateColor::darkModeColorFor(wxColour("#8F8F8F")), 1, wxPENSTYLE_SHORT_DASH));
+        const int ym = l.repeat_y + l.row_h / 2;
+        dc.DrawLine(l.x0, l.repeat_y + 2, l.x0 + gw, l.repeat_y + 2);
+        dc.DrawLine(l.x0, l.repeat_y + l.row_h - 2, l.x0 + gw, l.repeat_y + l.row_h - 2);
+        dc.SetTextForeground(StateColor::darkModeColorFor(wxColour("#8F8F8F")));
+        for (int c = 0; c < l.cols; ++c) {
+            const wxSize te = dc.GetTextExtent("|");
+            dc.DrawText("|", l.x0 + c * l.col_w + (l.col_w - te.x) / 2, ym - te.y / 2);
+        }
+        const wxString rep = _L("repeat");
+        const wxSize   te  = dc.GetTextExtent(rep);
+        dc.DrawText(rep, std::max(0, FromDIP(MWD_LABEL_W) - te.x), ym - te.y / 2);
+    }
+
+    // ---- Bottom section: row 0 = first layer, drawn at the bottom ----
+    for (int r = 0; r < l.bottom_rows; ++r) {
+        const MixedShellRow row = m_mwd_bottom[size_t(r)];
+        const int y = l.bottom_y + (l.bottom_rows - 1 - r) * l.row_h;
+        cell(l.x0, y, surface_w, row.first);
+        cell(outer_cx, y, outer_w, row.second);
+        if (r < l.bottom_rows - 1) {
+            hline(y, l.x0, l.x0 + surface_w, wxPENSTYLE_SOLID);
+            hline(y, outer_cx, outer_cx + outer_w, wxPENSTYLE_DOT);
+        }
+    }
+    section_label(l.bottom_y, l.bottom_rows, wxColour("#8E44AD"), _CTX(L_CONTEXT("Bottom", "Layers"), "Layers"));
+
+    // Section frames and the thick separator before the outer wall column.
+    for (auto [y, rows] : { std::pair<int, int>{ l.top_y, l.top_rows }, { l.body_y, l.body_rows }, { l.bottom_y, l.bottom_rows } }) {
+        if (rows <= 0)
+            continue;
+        frame(y, rows);
+        dc.SetPen(wxPen(ink, FromDIP(2)));
+        dc.DrawLine(outer_cx, y, outer_cx, y + rows * l.row_h);
+    }
+}
+
+void MixedFilamentDialog::on_mwd_grid_click(const wxPoint& pt, bool cycle_next)
+{
+    if (m_current_mode != MODE_MWD || m_filament_colours.empty())
+        return;
+    ensure_mwd_data();
+    const MwdLayout l = mwd_layout();
+    if (pt.x < l.x0 || pt.x >= l.x0 + l.grid_w())
+        return;
+    const int n_phys = (int)m_filament_colours.size();
+    auto apply = [&](unsigned int& id) {
+        if (cycle_next)
+            id = unsigned(((int)id % n_phys) + 1);
+        else
+            id = m_mwd_brush;
+    };
+    const int  col       = (pt.x - l.x0) / l.col_w;
+    const int  outer_cx  = (l.cols >= 2) ? l.x0 + (l.cols - 1) * l.col_w : l.x0 + l.col_w / 2;
+    const bool on_outer  = pt.x >= outer_cx;
+
+    bool changed = false;
+    if (pt.y >= l.top_y && pt.y < l.top_y + l.top_rows * l.row_h) {
+        MixedShellRow& row = m_mwd_top[size_t((pt.y - l.top_y) / l.row_h)];
+        apply(on_outer ? row.second : row.first);
+        changed = true;
+    } else if (pt.y >= l.body_y && pt.y < l.body_y + l.body_rows * l.row_h) {
+        const int r    = l.body_rows - 1 - (pt.y - l.body_y) / l.row_h;
+        const int wall = l.cols - 1 - std::clamp(col, 0, l.cols - 1);
+        apply(m_wall_grid[size_t(wall)][size_t(r)]);
+        changed = true;
+    } else if (pt.y >= l.bottom_y && pt.y < l.bottom_y + l.bottom_rows * l.row_h) {
+        const int r = l.bottom_rows - 1 - (pt.y - l.bottom_y) / l.row_h;
+        MixedShellRow& row = m_mwd_bottom[size_t(r)];
+        apply(on_outer ? row.second : row.first);
+        changed = true;
+    }
+    if (changed) {
+        m_mwd_grid_panel->Refresh();
+        m_mwd_iso_panel->Refresh();
+        update_compatibility_warning();
+    }
+}
+
+void MixedFilamentDialog::draw_mwd_iso(wxDC& dc)
+{
+    dc.SetBackground(wxBrush(StateColor::darkModeColorFor(wxColour("#FFFFFF"))));
+    dc.Clear();
+    if (m_current_mode != MODE_MWD || m_wall_grid.empty() || m_filament_colours.size() < 1)
+        return;
+
+    // Resolve every feature with the slicer core on a virtual object.
+    const size_t  num_physical = m_filament_colours.size();
+    MixedFilament row          = build_mwd_row();
+    MixedFilamentManager mgr;
+    mgr.mixed_filaments().push_back(row);
+    const unsigned int id        = unsigned(num_physical + 1);
+    const int          walls     = std::max(1, m_wall_count);
+    const int          body_rows = std::max(1, (int)m_wall_grid.front().size());
+    const int          repeats   = std::clamp(12 / body_rows, 2, 6);
+    const int          layers    = m_bottom_layers + body_rows * repeats + m_top_layers;
+    MixedFeatureContext ctx;
+    ctx.wall_loops         = walls;
+    ctx.top_layers         = m_top_layers;
+    ctx.bottom_layers      = m_bottom_layers;
+    ctx.object_layer_count = layers;
+    auto colour = [&](int layer, int feature) {
+        const unsigned int pid = num_physical >= 2 ?
+            mgr.resolve_feature(id, num_physical, layer, feature, 0.f, 0.f, ctx) : 1u;
+        const int idx = std::clamp((int)pid - 1, 0, (int)num_physical - 1);
+        return parse_mixed_color(m_filament_colours[size_t(idx)]);
+    };
+    auto shade = [](const wxColour& c, double f) {
+        return wxColour((unsigned char)std::clamp(int(c.Red() * f), 0, 255),
+                        (unsigned char)std::clamp(int(c.Green() * f), 0, 255),
+                        (unsigned char)std::clamp(int(c.Blue() * f), 0, 255));
+    };
+
+    // Isometric projection of the unit footprint [0,1]^2 with `layers` layers.
+    const wxSize sz = m_mwd_iso_panel->GetClientSize();
+    const double margin = FromDIP(10);
+    double S  = std::min((sz.x - 2 * margin) / 1.732, (sz.y - 2 * margin) * 0.6);
+    double lh = std::clamp((sz.y - 2 * margin - S) / double(layers), 1.5, double(FromDIP(10)));
+    S = std::min(S, (sz.y - 2 * margin) - lh * layers);
+    const double cx = sz.x / 2.0;
+    const double top_y = margin;
+    auto P = [&](double x, double y, double z) {
+        return wxPoint(int(std::lround(cx + (x - y) * 0.866 * S)),
+                       int(std::lround(top_y + (x + y) * 0.5 * S + (layers - z) * lh)));
+    };
+    auto quad = [&](wxPoint a, wxPoint b, wxPoint c, wxPoint d, const wxColour& col) {
+        wxPoint pts[4] = { a, b, c, d };
+        dc.SetPen(wxPen(col, 1));
+        dc.SetBrush(wxBrush(col));
+        dc.DrawPolygon(4, pts);
+    };
+
+    // Wall thickness on the footprint, outer -> inner, then infill.
+    const double t = std::min(0.09, 0.42 / double(walls + 1));
+    for (int k = 0; k < layers; ++k) {
+        const double z0 = k, z1 = k + 1;
+        const wxColour outer = colour(k, 0);
+        // Outer faces (quadrant away from the cut).
+        quad(P(1, 0, z0), P(1, 0.5, z0), P(1, 0.5, z1), P(1, 0, z1), shade(outer, 0.72));
+        quad(P(0, 1, z0), P(0.5, 1, z0), P(0.5, 1, z1), P(0, 1, z1), shade(outer, 0.88));
+        // Cut planes: walls from the outer surface towards the core.
+        for (int w = 0; w <= walls; ++w) {
+            const double a = (w < walls) ? 1.0 - w * t : 1.0 - walls * t;
+            const double b = (w < walls) ? 1.0 - (w + 1) * t : 0.5;
+            const wxColour c = colour(k, w < walls ? w : MixedFilamentManager::k_surface_feature);
+            quad(P(0.5, b, z0), P(0.5, a, z0), P(0.5, a, z1), P(0.5, b, z1), shade(c, 0.72)); // plane x=0.5
+            quad(P(b, 0.5, z0), P(a, 0.5, z0), P(a, 0.5, z1), P(b, 0.5, z1), shade(c, 0.88)); // plane y=0.5
+        }
+    }
+    // Top face: nested L shapes, outer wall ring first.
+    const int top_layer = layers - 1;
+    for (int w = 0; w <= walls; ++w) {
+        const double d = w * t;
+        const wxColour c = colour(top_layer, w < walls ? w : MixedFilamentManager::k_surface_feature);
+        wxPoint pts[6] = { P(d, d, layers), P(1 - d, d, layers), P(1 - d, 0.5, layers),
+                           P(0.5, 0.5, layers), P(0.5, 1 - d, layers), P(d, 1 - d, layers) };
+        dc.SetPen(wxPen(c, 1));
+        dc.SetBrush(wxBrush(c));
+        dc.DrawPolygon(6, pts);
+    }
+    // Silhouette edges
+    dc.SetPen(wxPen(StateColor::darkModeColorFor(wxColour(90, 90, 90)), 1));
+    const double Z = layers;
+    const wxPoint e[][2] = {
+        { P(0, 0, Z), P(1, 0, Z) }, { P(1, 0, Z), P(1, 0.5, Z) }, { P(1, 0.5, Z), P(0.5, 0.5, Z) },
+        { P(0.5, 0.5, Z), P(0.5, 1, Z) }, { P(0.5, 1, Z), P(0, 1, Z) }, { P(0, 1, Z), P(0, 0, Z) },
+        { P(1, 0, 0), P(1, 0, Z) }, { P(0, 1, 0), P(0, 1, Z) }, { P(1, 0.5, 0), P(1, 0.5, Z) },
+        { P(0.5, 1, 0), P(0.5, 1, Z) }, { P(0.5, 0.5, 0), P(0.5, 0.5, Z) },
+        { P(1, 0, 0), P(1, 0.5, 0) }, { P(1, 0.5, 0), P(0.5, 0.5, 0) }, { P(0.5, 0.5, 0), P(0.5, 1, 0) },
+        { P(0.5, 1, 0), P(0, 1, 0) } };
+    for (const auto& seg : e)
+        dc.DrawLine(seg[0], seg[1]);
 }
 
 void MixedFilamentDialog::on_dpi_changed(const wxRect& /*suggested_rect*/)

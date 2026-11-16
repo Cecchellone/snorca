@@ -15,6 +15,7 @@
 #include <sstream>
 #include <iomanip>
 #include <locale>
+#include <limits>
 #include <numeric>
 #include <system_error>
 #include <unordered_map>
@@ -393,7 +394,9 @@ static bool parse_row_definition(const std::string &row,
                                  int               &cm_mode,
                                  bool              &wall_dithering,
                                  int               &wall_dithering_shift,
-                                 bool              &wall_dithering_present)
+                                 bool              &wall_dithering_present,
+                                 std::string       &mwd_top,
+                                 std::string       &mwd_bottom)
 {
     auto trim_copy = [](const std::string &s) {
         size_t lo = 0;
@@ -505,6 +508,8 @@ static bool parse_row_definition(const std::string &row,
     wall_dithering         = false;
     wall_dithering_shift   = 1;
     wall_dithering_present = false;
+    mwd_top.clear();
+    mwd_bottom.clear();
 
     size_t token_idx = 5;
     if (tokens.size() >= 6) {
@@ -570,6 +575,16 @@ static bool parse_row_definition(const std::string &row,
         // Wall dithering token: "dw<flag>/<shift>". It starts with 'd' so that
         // older builds parse it as an (invalid, ignored) deleted token instead
         // of treating it as a pattern group.
+        // MWD shell rows: "dt<rows>" (top) and "db<rows>" (bottom). Also 'd'
+        // prefixed so that older builds ignore them.
+        if ((tok[0] == 'd' || tok[0] == 'D') && tok.size() >= 3 && (tok[1] == 't' || tok[1] == 'T' || tok[1] == 'b' || tok[1] == 'B')) {
+            const std::string body = MixedFilamentManager::encode_shell_rows(MixedFilamentManager::decode_shell_rows(tok.substr(2)));
+            if (tok[1] == 't' || tok[1] == 'T')
+                mwd_top = body;
+            else
+                mwd_bottom = body;
+            continue;
+        }
         if ((tok[0] == 'd' || tok[0] == 'D') && tok.size() >= 3 && (tok[1] == 'w' || tok[1] == 'W')) {
             const std::string body  = tok.substr(2);
             const size_t      slash = body.find('/');
@@ -604,7 +619,7 @@ static bool parse_row_definition(const std::string &row,
         if ((tok[0] == 'c' || tok[0] == 'C') && tok.size() >= 3 && (tok[1] == 'm' || tok[1] == 'M')) {
             int v = cm_mode;
             if (parse_int_token(tok.substr(2), v))
-                cm_mode = std::clamp(v, -1, 3);
+                cm_mode = std::clamp(v, -1, 4);
             continue;
         }
         if (tok[0] == 'r' || tok[0] == 'R') {
@@ -902,6 +917,10 @@ void MixedFilamentManager::expand_virtual_extruder_ids(std::vector<int> &ids, si
                     mf->gradient_component_ids, num_physical);
                 for (unsigned int gid : gradient_ids)
                     expanded.push_back(static_cast<int>(gid));
+                // Manual pattern / MWD grid and shell rows may reference
+                // further physical filaments.
+                for (unsigned int pid : pattern_physical_ids(*mf, num_physical))
+                    expanded.push_back(static_cast<int>(pid));
             } else {
                 expanded.push_back(id);
             }
@@ -1839,6 +1858,23 @@ void MixedFilamentManager::remove_physical_filament(unsigned int deleted_filamen
         if (uses_deleted_in_pattern)
             continue;
 
+        // ---- 1b. MWD shell rows ----
+        {
+            bool uses_deleted_in_shell = false;
+            for (std::string *rows : {&mf.mwd_top, &mf.mwd_bottom}) {
+                std::vector<MixedShellRow> decoded = decode_shell_rows(*rows);
+                for (MixedShellRow &row : decoded) {
+                    if (row.first == deleted_filament_id || row.second == deleted_filament_id)
+                        uses_deleted_in_shell = true;
+                    if (row.first > deleted_filament_id) --row.first;
+                    if (row.second > deleted_filament_id) --row.second;
+                }
+                *rows = encode_shell_rows(decoded);
+            }
+            if (uses_deleted_in_shell)
+                continue;
+        }
+
         // ---- 2. gradient components ----
         // Only check when there is no manual_pattern; a pattern already resolves
         // every token, so the gradient check would be a false positive at worst.
@@ -2193,6 +2229,12 @@ RedundantFilamentSet compute_redundant_filaments(
         // in the norm-empty branch, matching remove_physical_filament.
         bool cascade = false;
         if (in_kept_set) {
+            for (const std::string *rows : {&mf.mwd_top, &mf.mwd_bottom})
+                for (const MixedShellRow &row : MixedFilamentManager::decode_shell_rows(*rows))
+                    if (row.first > num_physical || row.second > num_physical || !phys_kept[row.first] || !phys_kept[row.second])
+                        cascade = true;
+        }
+        if (in_kept_set && !cascade) {
             const std::string norm = MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern);
             if (!norm.empty()) {
                 // Manual pattern authoritative: token '1'->component_a,
@@ -2389,6 +2431,10 @@ std::string MixedFilamentManager::serialize_custom_entries()
         // treated as legacy (per-wall) on load.
         if (mf.wall_dithering || normalized_pattern.find(',') != std::string::npos)
             ss << ",dw" << (mf.wall_dithering ? 1 : 0) << '/' << std::clamp(mf.wall_dithering_shift, 0, 64);
+        if (!mf.mwd_top.empty())
+            ss << ",dt" << encode_shell_rows(decode_shell_rows(mf.mwd_top));
+        if (!mf.mwd_bottom.empty())
+            ss << ",db" << encode_shell_rows(decode_shell_rows(mf.mwd_bottom));
         if (mf.gradient_enabled)
             ss << ",r1/" << float_to_string_decimal_point(mf.gradient_start, 4) << '/'
                << float_to_string_decimal_point(mf.gradient_end, 4);
@@ -2469,11 +2515,14 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         bool  wall_dithering = false;
         int   wall_dithering_shift = 1;
         bool  wall_dithering_present = false;
+        std::string mwd_top;
+        std::string mwd_bottom;
         if (!parse_row_definition(row, a, b, stable_id, enabled, custom, origin_auto, mix, pointillism_all_filaments,
                                   gradient_component_ids, gradient_component_weights, manual_pattern, distribution_mode,
                                   local_z_max_sublayers, component_a_surface_offset, component_b_surface_offset, deleted,
                                   gradient_enabled, gradient_start, gradient_end, cm_mode,
-                                  wall_dithering, wall_dithering_shift, wall_dithering_present)) {
+                                  wall_dithering, wall_dithering_shift, wall_dithering_present,
+                                  mwd_top, mwd_bottom)) {
             ++skipped_rows;
             BOOST_LOG_TRIVIAL(warning) << "MixedFilamentManager::load_custom_entries invalid row format: " << row;
             continue;
@@ -2488,7 +2537,12 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
             continue;
         }
 
-        if (mixed_filament_references_exceed_physical(gradient_component_ids, manual_pattern, n)) {
+        bool shell_exceeds = false;
+        for (const std::string *rows : {&mwd_top, &mwd_bottom})
+            for (const MixedShellRow &row : decode_shell_rows(*rows))
+                if (row.first > n || row.second > n)
+                    shell_exceeds = true;
+        if (shell_exceeds || mixed_filament_references_exceed_physical(gradient_component_ids, manual_pattern, n)) {
             ++skipped_rows;
             BOOST_LOG_TRIVIAL(warning) << "MixedFilamentManager::load_custom_entries row rejected: "
                                           "gradient/pattern references filament exceeding physical count"
@@ -2553,6 +2607,8 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
             mf.gradient_end     = gradient_end;
             mf.wall_dithering       = wall_dithering;
             mf.wall_dithering_shift = wall_dithering_shift;
+            mf.mwd_top              = mwd_top;
+            mf.mwd_bottom           = mwd_bottom;
             disable_pointillism_mode(mf);
 
             rebuilt.push_back(std::move(mf));
@@ -2591,6 +2647,8 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         mf.gradient_end     = gradient_end;
         mf.wall_dithering       = wall_dithering;
         mf.wall_dithering_shift = wall_dithering_shift;
+        mf.mwd_top              = mwd_top;
+        mf.mwd_bottom           = mwd_bottom;
         disable_pointillism_mode(mf);
         rebuilt.push_back(std::move(mf));
         ++loaded_rows;
@@ -2700,14 +2758,74 @@ unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
     return (pos < mf.ratio_a) ? mf.component_a : mf.component_b;
 }
 
+std::vector<MixedShellRow> MixedFilamentManager::decode_shell_rows(const std::string &rows, size_t num_physical)
+{
+    std::vector<MixedShellRow> out;
+    std::stringstream ss(rows);
+    std::string item;
+    while (std::getline(ss, item, '.')) {
+        const size_t dash = item.find('-');
+        if (dash == std::string::npos)
+            continue;
+        char *end_a = nullptr;
+        char *end_b = nullptr;
+        const std::string sa = item.substr(0, dash);
+        const std::string sb = item.substr(dash + 1);
+        if (sa.empty() || sb.empty())
+            continue;
+        const unsigned long a = std::strtoul(sa.c_str(), &end_a, 10);
+        const unsigned long b = std::strtoul(sb.c_str(), &end_b, 10);
+        if (*end_a != '\0' || *end_b != '\0' || a < 1 || b < 1 || a > kMaxPhysicalFilaments || b > kMaxPhysicalFilaments)
+            continue;
+        if (num_physical > 0 && (a > num_physical || b > num_physical))
+            continue;
+        out.emplace_back(unsigned(a), unsigned(b));
+    }
+    return out;
+}
+
+std::string MixedFilamentManager::encode_shell_rows(const std::vector<MixedShellRow> &rows)
+{
+    std::string out;
+    for (const MixedShellRow &row : rows) {
+        if (!out.empty())
+            out.push_back('.');
+        out += std::to_string(row.first);
+        out.push_back('-');
+        out += std::to_string(row.second);
+    }
+    return out;
+}
+
+std::vector<unsigned int> MixedFilamentManager::pattern_physical_ids(const MixedFilament &mf, size_t num_physical)
+{
+    std::vector<unsigned int> ids;
+    auto add = [&ids](unsigned int id) {
+        if (id >= 1 && std::find(ids.begin(), ids.end(), id) == ids.end())
+            ids.push_back(id);
+    };
+    const std::string norm = normalize_manual_pattern(mf.manual_pattern);
+    if (!norm.empty())
+        for (const std::string &group : split_pattern_groups(norm))
+            for (const std::string &token : tokenize_pattern_group(group))
+                add(physical_filament_from_token(token, mf, num_physical == 0 ? kMaxPhysicalFilaments : num_physical));
+    for (const std::string *rows : {&mf.mwd_top, &mf.mwd_bottom})
+        for (const MixedShellRow &row : decode_shell_rows(*rows, num_physical)) {
+            add(row.first);
+            add(row.second);
+        }
+    return ids;
+}
+
 bool MixedFilamentManager::uses_wall_dithering(const MixedFilament &mf)
 {
     if (!mf.wall_dithering || mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
         return false;
     const std::string normalized = normalize_manual_pattern(mf.manual_pattern);
     if (!normalized.empty())
-        // Manual grid: per-wall only when there is more than one wall column.
-        return normalized.find(',') != std::string::npos;
+        // Manual grid (MWD): per-feature when there is more than one wall
+        // column or when top/bottom shell rows are defined.
+        return normalized.find(',') != std::string::npos || !mf.mwd_top.empty() || !mf.mwd_bottom.empty();
     // Automatic per-wall phase shift. Z gradients are produced by the Local-Z
     // planner and cannot be phase shifted per wall.
     if (mf.gradient_enabled)
@@ -2734,42 +2852,93 @@ unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
     const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
     if (mixed_idx < 0)
         return filament_id;
+    if (!uses_wall_dithering(m_mixed[size_t(mixed_idx)]))
+        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
+    MixedFeatureContext ctx;
+    ctx.wall_loops = wall_loops;
+    return resolve_feature(filament_id, num_physical, layer_index, std::max(0, perimeter_index), layer_print_z, layer_height,
+                           ctx, current_object);
+}
+
+unsigned int MixedFilamentManager::resolve_feature(unsigned int               filament_id,
+                                                   size_t                     num_physical,
+                                                   int                        layer_index,
+                                                   int                        perimeter_index,
+                                                   float                      layer_print_z,
+                                                   float                      layer_height,
+                                                   const MixedFeatureContext &ctx,
+                                                   const PrintObject         *current_object) const
+{
+    const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
+    if (mixed_idx < 0)
+        return filament_id;
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
     if (!uses_wall_dithering(mf))
-        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
+        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, false, current_object);
 
-    int wall_idx = std::max(0, perimeter_index);
-    if (wall_loops > 0)
-        wall_idx = std::min(wall_idx, wall_loops - 1);
+    const bool surface = perimeter_index < 0;
 
-    if (!mf.manual_pattern.empty()) {
+    // ---- MWD shell sections (top has priority over bottom) ----
+    auto pick_shell = [&](const std::vector<MixedShellRow> &rows, int row_idx) -> unsigned int {
+        if (rows.empty() || row_idx < 0)
+            return 0;
+        const MixedShellRow &row = rows[std::min(size_t(row_idx), rows.size() - 1)];
+        const unsigned int id = (!surface && perimeter_index == 0) ? row.second : row.first;
+        return (id >= 1 && id <= num_physical) ? id : 0;
+    };
+    const bool manual = !mf.manual_pattern.empty();
+    int bottom_rows_used = 0;
+    if (manual) {
+        if (ctx.top_layers > 0 && ctx.object_layer_count > 0 && !mf.mwd_top.empty()) {
+            const int first_top = ctx.object_layer_count - ctx.top_layers;
+            if (layer_index >= first_top && layer_index < ctx.object_layer_count)
+                if (const unsigned int id = pick_shell(decode_shell_rows(mf.mwd_top, num_physical), ctx.object_layer_count - 1 - layer_index))
+                    return id;
+        }
+        if (ctx.bottom_layers > 0 && !mf.mwd_bottom.empty()) {
+            bottom_rows_used = ctx.bottom_layers;
+            if (layer_index >= 0 && layer_index < ctx.bottom_layers)
+                if (const unsigned int id = pick_shell(decode_shell_rows(mf.mwd_bottom, num_physical), layer_index))
+                    return id;
+        }
+    }
+
+    // ---- Wall body ----
+    int wall_idx = 0;
+    if (surface)
+        wall_idx = ctx.wall_loops > 0 ? ctx.wall_loops - 1 : std::numeric_limits<int>::max() / 2; // innermost wall
+    else
+        wall_idx = ctx.wall_loops > 0 ? std::min(perimeter_index, ctx.wall_loops - 1) : perimeter_index;
+
+    if (manual) {
         const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
         if (!pattern_groups.empty()) {
             // Walls deeper than the last defined column repeat the deepest one.
             const std::string &group = pattern_groups[std::min(size_t(wall_idx), pattern_groups.size() - 1)];
-            if (!group.empty()) {
-                const std::vector<std::string> tokens = split_pattern_group_to_tokens(group, num_physical);
-                if (!tokens.empty()) {
-                    const int pos = MixedFilamentManager::safe_mod(layer_index, int(tokens.size()));
-                    const unsigned int resolved = physical_filament_from_token(tokens[size_t(pos)], mf, num_physical);
-                    if (resolved >= 1 && resolved <= num_physical)
-                        return resolved;
-                }
+            const std::vector<std::string> tokens = split_pattern_group_to_tokens(group, num_physical);
+            if (!tokens.empty()) {
+                // With a bottom section the body cycle starts right above it.
+                const int pos = MixedFilamentManager::safe_mod(layer_index - bottom_rows_used, int(tokens.size()));
+                const unsigned int resolved = physical_filament_from_token(tokens[size_t(pos)], mf, num_physical);
+                if (resolved >= 1 && resolved <= num_physical)
+                    return resolved;
             }
         }
-        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
+        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, false, current_object);
     }
 
     // Automatic mode: phase shift the row's own layer cadence by
     // `wall_dithering_shift` layers for every wall step inwards.
+    if (surface && ctx.wall_loops <= 0)
+        wall_idx = 0;
     const int offset = wall_idx * std::max(0, mf.wall_dithering_shift);
     return resolve(filament_id,
                    num_physical,
                    layer_index + offset,
                    layer_print_z + float(offset) * layer_height,
                    layer_height,
-                   force_height_weighted,
+                   false,
                    current_object);
 }
 
@@ -2848,6 +3017,21 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
                                                                             bool         force_height_weighted,
                                                                             int          wall_loops) const
 {
+    const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
+    if (mixed_idx >= 0 && !uses_wall_dithering(m_mixed[size_t(mixed_idx)]))
+        return { resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted) };
+    MixedFeatureContext ctx;
+    ctx.wall_loops = wall_loops;
+    return ordered_feature_extruders(filament_id, num_physical, layer_index, layer_print_z, layer_height, ctx);
+}
+
+std::vector<unsigned int> MixedFilamentManager::ordered_feature_extruders(unsigned int               filament_id,
+                                                                          size_t                     num_physical,
+                                                                          int                        layer_index,
+                                                                          float                      layer_print_z,
+                                                                          float                      layer_height,
+                                                                          const MixedFeatureContext &ctx) const
+{
     std::vector<unsigned int> ordered;
 
     const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
@@ -2859,25 +3043,16 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
     if (uses_wall_dithering(mf)) {
         size_t wall_count = 0;
-        if (!mf.manual_pattern.empty()) {
-            const size_t groups = split_manual_pattern_groups(mf.manual_pattern).size();
-            // Columns beyond the configured wall count are kept but unused;
-            // missing columns repeat the deepest one (no new extruder).
-            wall_count = wall_loops > 0 ? std::min(groups, size_t(wall_loops)) : groups;
-        } else {
-            wall_count = size_t(std::max(1, wall_loops));
-        }
+        if (ctx.wall_loops > 0)
+            wall_count = size_t(ctx.wall_loops);
+        else if (!mf.manual_pattern.empty())
+            wall_count = std::max<size_t>(1, split_manual_pattern_groups(mf.manual_pattern).size());
+        else
+            wall_count = 1;
         ordered.reserve(wall_count);
         for (size_t wall_idx = 0; wall_idx < wall_count; ++wall_idx) {
-            const unsigned int resolved = resolve_perimeter(filament_id,
-                                                            num_physical,
-                                                            layer_index,
-                                                            int(wall_idx),
-                                                            layer_print_z,
-                                                            layer_height,
-                                                            force_height_weighted,
-                                                            nullptr,
-                                                            wall_loops);
+            const unsigned int resolved =
+                resolve_feature(filament_id, num_physical, layer_index, int(wall_idx), layer_print_z, layer_height, ctx);
             if (resolved < 1 || resolved > num_physical)
                 continue;
             if (std::find(ordered.begin(), ordered.end(), resolved) == ordered.end())
@@ -2887,7 +3062,7 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
             return ordered;
     }
 
-    ordered.emplace_back(resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted));
+    ordered.emplace_back(resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height));
     return ordered;
 }
 
@@ -2939,6 +3114,14 @@ std::vector<size_t> MixedFilamentManager::mixed_filaments_using_physical(unsigne
                 }
                 if (depends_on_physical) break;
             }
+        }
+
+        // Check MWD shell rows
+        if (!depends_on_physical) {
+            for (const std::string *rows : {&mf.mwd_top, &mf.mwd_bottom})
+                for (const MixedShellRow &row : decode_shell_rows(*rows))
+                    if (row.first == physical_filament_1based || row.second == physical_filament_1based)
+                        depends_on_physical = true;
         }
 
         // Check gradient components (resolve order #2)

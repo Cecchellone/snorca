@@ -4780,7 +4780,7 @@ static bool split_extrusion_collection_for_multi_perimeter_pattern(
     const PrintObject*                                       current_object = nullptr,
     float                                                    layer_print_z  = 0.f,
     float                                                    layer_height   = 0.f,
-    int                                                      wall_loops     = 0)
+    const MixedFeatureContext&                               feature_ctx    = MixedFeatureContext())
 {
     out_by_extruder.clear();
     out_by_extruder.resize(num_physical);
@@ -4799,8 +4799,8 @@ static bool split_extrusion_collection_for_multi_perimeter_pattern(
         if (perimeter_index < 0)
             perimeter_index = entity->role() == erExternalPerimeter ? 0 : 1;
 
-        const unsigned int extruder_id = mixed_mgr.resolve_perimeter(
-            mixed_filament_id, num_physical, layer_index, perimeter_index, layer_print_z, layer_height, false, current_object, wall_loops);
+        const unsigned int extruder_id = mixed_mgr.resolve_feature(
+            mixed_filament_id, num_physical, layer_index, perimeter_index, layer_print_z, layer_height, feature_ctx, current_object);
         if (extruder_id == 0 || extruder_id > num_physical)
             continue;
 
@@ -6151,6 +6151,11 @@ LayerResult GCode::process_layer(const Print& print,
                                 size_t bucket_count = 0;
                                 const PrintObject* current_object_for_gradient =
                                     layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
+                                MixedFeatureContext feature_ctx;
+                                feature_ctx.wall_loops         = region.config().wall_loops.value;
+                                feature_ctx.top_layers         = region.config().top_shell_layers.value;
+                                feature_ctx.bottom_layers      = region.config().bottom_shell_layers.value;
+                                feature_ctx.object_layer_count = layer_tools.object_layer_count;
                                 if (split_extrusion_collection_for_multi_perimeter_pattern(*filtered_extrusions,
                                                                                            *layer_tools.mixed_mgr,
                                                                                            mixed_filament_id,
@@ -6161,7 +6166,7 @@ LayerResult GCode::process_layer(const Print& print,
                                                                                            current_object_for_gradient,
                                                                                            float(layer_tools.print_z),
                                                                                            float(layer_tools.layer_height),
-                                                                                           region.config().wall_loops.value)) {
+                                                                                           feature_ctx)) {
                                     if (bucket_count >= 2) {
                                         for (size_t extruder_idx = 0; extruder_idx < split_by_extruder.size(); ++extruder_idx) {
                                             std::unique_ptr<ExtrusionEntityCollection>& split_collection = split_by_extruder[extruder_idx];

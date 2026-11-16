@@ -6569,6 +6569,8 @@ void Sidebar::init_color_mix_panel(wxWindow* parent, wxSizer* sizer)
             mfs.back().ui_mode                       = r.ui_mode;
             mfs.back().wall_dithering                = r.wall_dithering;
             mfs.back().wall_dithering_shift          = r.wall_dithering_shift;
+            mfs.back().mwd_top                       = r.mwd_top;
+            mfs.back().mwd_bottom                    = r.mwd_bottom;
             mfs.back().custom                  = true;
         }
         if (auto* opt = pb->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
@@ -6827,6 +6829,8 @@ void Sidebar::update_color_mix_panel()
             mfs2[i].ui_mode                       = r.ui_mode;
             mfs2[i].wall_dithering             = r.wall_dithering;
             mfs2[i].wall_dithering_shift       = r.wall_dithering_shift;
+            mfs2[i].mwd_top                    = r.mwd_top;
+            mfs2[i].mwd_bottom                 = r.mwd_bottom;
             mfs2[i].custom                      = true;
             if (auto* opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
                 opt->value = mgr.serialize_custom_entries();
@@ -6877,6 +6881,8 @@ void Sidebar::update_color_mix_panel()
                 mfs2[i].ui_mode                       = r.ui_mode;
                 mfs2[i].wall_dithering             = r.wall_dithering;
                 mfs2[i].wall_dithering_shift       = r.wall_dithering_shift;
+                mfs2[i].mwd_top                    = r.mwd_top;
+                mfs2[i].mwd_bottom                 = r.mwd_bottom;
                 mfs2[i].custom                      = true;
                 if (auto* opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
                     opt->value = mgr.serialize_custom_entries();

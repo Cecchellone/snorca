@@ -69,17 +69,21 @@ unsigned int effective_infill_filament_id(const Layer &layer, const PrintRegionC
     if (!MixedFilamentManager::uses_wall_dithering(*mixed_row))
         return filament_id;
 
-    // Wall dithering: infill uses the innermost configured wall's filament.
-    const int innermost_perimeter_index = std::max(0, config.wall_loops.value - 1);
-    return mixed_mgr.resolve_perimeter(filament_id,
-                                       num_physical,
-                                       int(layer.id()),
-                                       innermost_perimeter_index,
-                                       float(layer.print_z),
-                                       float(layer.height),
-                                       false,
-                                       object,
-                                       config.wall_loops.value);
+    // Wall dithering: infill follows the innermost configured wall, or the
+    // MWD top/bottom surface filament inside the shell layers.
+    MixedFeatureContext ctx;
+    ctx.wall_loops         = config.wall_loops.value;
+    ctx.top_layers         = config.top_shell_layers.value;
+    ctx.bottom_layers      = config.bottom_shell_layers.value;
+    ctx.object_layer_count = int(object->layer_count());
+    return mixed_mgr.resolve_feature(filament_id,
+                                     num_physical,
+                                     int(layer.id()),
+                                     MixedFilamentManager::k_surface_feature,
+                                     float(layer.print_z),
+                                     float(layer.height),
+                                     ctx,
+                                     object);
 }
 
 } // namespace

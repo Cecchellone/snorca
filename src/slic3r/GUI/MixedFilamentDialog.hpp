@@ -60,25 +60,35 @@ private:
     void collect_result();
     void draw_strip(wxDC& dc, wxPanel* panel);
 
-    // ---- Wall dithering (per-wall filament grid) ----
+    // ---- Wall dithering (automatic, Ratio / Match modes) ----
     void build_wall_dithering_card(wxSizer* scroll_sizer);
     void init_wall_dithering_from_result();
-    int  read_configured_wall_count() const;
+    void read_shell_config();
     bool wall_dithering_active() const;
-    void ensure_wall_grid();
-    void resize_wall_rows(int rows);
-    std::string wall_grid_to_pattern(size_t first_column, size_t column_count) const;
-    void sync_wall_grid_to_pattern_ctrl();
     void update_wall_dithering_ui();
     void refresh_wall_grid_panel();
     void draw_wall_grid(wxDC& dc);
-    void on_wall_grid_click(const wxPoint& pt, bool backwards);
     std::vector<std::vector<unsigned int>> compute_auto_wall_preview(int rows);
+
+    // ---- MWD (Multiple Wall Dithering) mode ----
+    void build_mwd_card(wxSizer* scroll_sizer);
+    void ensure_mwd_data();
+    void resize_wall_rows(int rows);
+    std::string wall_grid_to_pattern(size_t first_column, size_t column_count) const;
+    MixedFilament build_mwd_row() const;
+    std::vector<unsigned int> mwd_used_filaments() const;
+    void update_mwd_ui();
+    void draw_mwd_grid(wxDC& dc);
+    void draw_mwd_iso(wxDC& dc);
+    void on_mwd_grid_click(const wxPoint& pt, bool cycle_next);
+    struct MwdLayout;
+    MwdLayout mwd_layout() const;
 
     static constexpr int MODE_RATIO    = 0;
     static constexpr int MODE_CYCLE    = 1;
     static constexpr int MODE_MATCH    = 2;
     static constexpr int MODE_GRADIENT = 3;
+    static constexpr int MODE_MWD      = 4;
 
     // Segmented mode buttons
     class StaticBox*        m_mode_btn_container    = nullptr;
@@ -202,24 +212,38 @@ private:
     };
     std::vector<FilamentRow> m_filament_rows;
 
-    // Wall dithering state
+    // Wall dithering (automatic) state
     class StaticBox*        m_wall_card             = nullptr;
     wxBoxSizer*             m_wall_card_sizer       = nullptr;
     wxCheckBox*             m_wall_check            = nullptr;
     wxStaticText*           m_wall_info             = nullptr;
     wxPanel*                m_wall_grid_panel       = nullptr;
-    wxPanel*                m_wall_cycle_controls   = nullptr;
-    wxStaticText*           m_wall_rows_label       = nullptr;
     wxPanel*                m_wall_auto_controls    = nullptr;
     wxSpinCtrl*             m_wall_shift_spin       = nullptr;
-    wxWindow*               m_pattern_input_wrapper = nullptr;
     bool                    m_wall_dithering        = false;
     int                     m_wall_shift            = 1;
+    // Process settings the wall/shell counts follow.
     int                     m_wall_count            = 1;
-    // Manual grid, stored outermost wall first: m_wall_grid[wall][layer] is a
+    int                     m_top_layers            = 0;
+    int                     m_bottom_layers         = 0;
+
+    // MWD state
+    class StaticBox*        m_mwd_card              = nullptr;
+    wxStaticText*           m_mwd_info              = nullptr;
+    wxStaticText*           m_mwd_rows_label        = nullptr;
+    wxStaticText*           m_mwd_brush_label       = nullptr;
+    wxPanel*                m_mwd_brush_swatch      = nullptr;
+    wxPanel*                m_mwd_grid_panel        = nullptr;
+    wxPanel*                m_mwd_iso_panel         = nullptr;
+    unsigned int            m_mwd_brush             = 1;
+    // Wall grid, stored outermost wall first: m_wall_grid[wall][layer] is a
     // 1-based physical filament id. Columns beyond m_wall_count are kept in
     // memory (and saved) but unused by the slicer.
     std::vector<std::vector<unsigned int>> m_wall_grid;
+    // Shell rows (surface, outer): top row 0 = topmost layer, bottom row 0 =
+    // first layer. Rows beyond the configured shell layers are kept, unused.
+    std::vector<Slic3r::MixedShellRow> m_mwd_top;
+    std::vector<Slic3r::MixedShellRow> m_mwd_bottom;
 
     const std::vector<std::string>& m_filament_colours;
     Slic3r::MixedFilament            m_result;

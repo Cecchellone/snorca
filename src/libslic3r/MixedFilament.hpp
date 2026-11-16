@@ -83,6 +83,17 @@ struct MixedFilament
     bool wall_dithering       = false;
     int  wall_dithering_shift = 1;
 
+    // Multiple Wall Dithering (MWD) shell patterns, only used together with
+    // wall_dithering. One row per shell layer, encoded "S-O.S-O..." where S is
+    // the surface filament (top/bottom infill, ironing and inner walls) and O
+    // the outer wall filament of that layer (1-based physical ids).
+    // - mwd_top:    row 0 = topmost layer of the object, going down.
+    // - mwd_bottom: row 0 = first layer of the object, going up.
+    // The number of rows used follows top/bottom_shell_layers: extra rows are
+    // kept but ignored, missing rows repeat the deepest defined row.
+    std::string mwd_top;
+    std::string mwd_bottom;
+
     static constexpr float k_default_gradient_dominant = 0.8f;  // Dominant component ratio
     static constexpr float k_default_gradient_minority = 0.2f;  // Minority component ratio
     static constexpr float k_min_gradient_difference   = 0.05f; // Minimum difference for valid gradient
@@ -135,6 +146,8 @@ struct MixedFilament
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
                wall_dithering == rhs.wall_dithering &&
                wall_dithering_shift == rhs.wall_dithering_shift &&
+               mwd_top == rhs.mwd_top &&
+               mwd_bottom == rhs.mwd_bottom &&
                gradient_enabled == rhs.gradient_enabled &&
                std::abs(gradient_start - rhs.gradient_start) <= k_gradient_epsilon &&
                std::abs(gradient_end   - rhs.gradient_end)   <= k_gradient_epsilon &&
@@ -208,6 +221,18 @@ struct MixedFilamentBatchEntry
     float        gradient_end      = MixedFilament::k_default_gradient_minority;
     std::string  display_color;   // pre-computed "#RRGGBB" hex
 };
+
+// Per-feature context used to resolve wall dithered (MWD) rows.
+struct MixedFeatureContext
+{
+    int wall_loops         = 0; // configured walls; 0 = no limit
+    int top_layers         = 0; // top_shell_layers; 0 disables the top section
+    int bottom_layers      = 0; // bottom_shell_layers; 0 disables the bottom section
+    int object_layer_count = 0; // layers of the object; 0 disables the top section
+};
+
+// One MWD shell row: (surface filament, outer wall filament), 1-based ids.
+using MixedShellRow = std::pair<unsigned int, unsigned int>;
 
 // ---------------------------------------------------------------------------
 class MixedFilamentManager
@@ -342,6 +367,33 @@ public:
                                    bool         force_height_weighted = false,
                                    const PrintObject* current_object = nullptr,
                                    int          wall_loops = 0) const;
+    // Feature-aware resolution for wall dithered rows. `perimeter_index` is the
+    // wall index (0 = outermost) or k_surface_feature for infill / top / bottom
+    // surfaces / ironing. Inside the top/bottom shell layers the outer wall
+    // uses the row's outer filament and everything else its surface filament;
+    // elsewhere walls follow the wall grid and surfaces the innermost wall.
+    static constexpr int k_surface_feature = -1;
+    unsigned int resolve_feature(unsigned int               filament_id,
+                                 size_t                     num_physical,
+                                 int                        layer_index,
+                                 int                        perimeter_index,
+                                 float                      layer_print_z,
+                                 float                      layer_height,
+                                 const MixedFeatureContext &ctx,
+                                 const PrintObject         *current_object = nullptr) const;
+    // Distinct extruders of all walls of the layer (outermost first).
+    std::vector<unsigned int> ordered_feature_extruders(unsigned int               filament_id,
+                                                        size_t                     num_physical,
+                                                        int                        layer_index,
+                                                        float                      layer_print_z,
+                                                        float                      layer_height,
+                                                        const MixedFeatureContext &ctx) const;
+    // MWD shell row encoding helpers ("S-O.S-O").
+    static std::vector<MixedShellRow> decode_shell_rows(const std::string &rows, size_t num_physical = 0);
+    static std::string                encode_shell_rows(const std::vector<MixedShellRow> &rows);
+    // All physical ids referenced by the manual pattern and MWD shell rows.
+    static std::vector<unsigned int>  pattern_physical_ids(const MixedFilament &mf, size_t num_physical);
+
     // True when this row resolves a different filament per wall
     // (wall dithering enabled with either a grouped manual pattern or the
     // automatic per-wall phase shift).

@@ -19215,12 +19215,6 @@ msgstr "Sfasamento strati per muro"
 msgid "Each wall repeats the mix layer sequence shifted by this many layers relative to the next outer wall."
 msgstr "Ogni muro ripete la sequenza di strati del mix sfasata di questo numero di strati rispetto al muro immediatamente più esterno."
 
-msgid "Remove the top layer of the cycle"
-msgstr "Rimuovi lo strato più in alto del ciclo"
-
-msgid "Add a layer to the cycle"
-msgstr "Aggiungi uno strato al ciclo"
-
 msgid "Inner"
 msgstr "Interno"
 
@@ -19230,23 +19224,44 @@ msgstr "Esterno"
 msgid "Not available with Z gradients: they are produced by Local-Z sub-layers."
 msgstr "Non disponibile con i gradienti in Z: sono prodotti dai sotto-strati Local-Z."
 
-msgid "Print each wall of the layer with a different filament of the mix."
-msgstr "Stampa ogni muro dello strato con un filamento diverso del mix."
-
-msgid "Walls used: %d (process \"Wall loops\"). Right column = outermost wall, left = innermost; bottom row = first layer of the cycle. Click a cell for the next filament, right-click for the previous one."
-msgstr "Muri usati: %d (\"Perimetri di stampa\" del processo). Colonna destra = muro più esterno, sinistra = più interno; riga in basso = primo strato del ciclo. Clic su una cella per il filamento successivo, clic destro per il precedente."
-
 msgid "Walls used: %d (process \"Wall loops\"). The mix sequence is shifted automatically for every wall. Preview: right = outermost wall, bottom = first layer."
 msgstr "Muri usati: %d (\"Perimetri di stampa\" del processo). La sequenza del mix viene sfasata automaticamente per ogni muro. Anteprima: destra = muro più esterno, in basso = primo strato."
-
-msgid "Layers in cycle: %d"
-msgstr "Strati nel ciclo: %d"
 
 msgid "  (%d extra walls kept, unused)"
 msgstr "  (%d muri extra conservati, non usati)"
 
-msgid "Comma separated wall groups require \"Wall dithering\" to be enabled."
-msgstr "I gruppi di muri separati da virgole richiedono che \"Dithering dei muri\" sia attivo."
+msgid "MWD"
+msgstr "MWD"
+
+msgid "Multiple Wall Dithering: a different filament for every wall, plus dedicated top and bottom patterns."
+msgstr "Multiple Wall Dithering: un filamento diverso per ogni muro, più pattern dedicati per top e bottom."
+
+msgid "Per-wall patterns (commas) are edited in the MWD mode."
+msgstr "I pattern per muro (virgole) si modificano nella modalità MWD."
+
+msgid "Print each wall of the layer with a different filament of the mix. For a fully manual layout use the MWD mode."
+msgstr "Stampa ogni muro dello strato con un filamento diverso del mix. Per una disposizione completamente manuale usa la modalità MWD."
+
+msgid "Paint with filament %d"
+msgstr "Dipingi con il filamento %d"
+
+msgid "Remove the top layer of the wall cycle"
+msgstr "Rimuovi lo strato più in alto del ciclo dei muri"
+
+msgid "Add a layer to the wall cycle"
+msgstr "Aggiungi uno strato al ciclo dei muri"
+
+msgid "Walls: %d, top layers: %d, bottom layers: %d (process settings). Right column = outer wall, left = innermost. Click a cell to paint it with the selected filament, right-click for the next one."
+msgstr "Muri: %d, strati top: %d, strati bottom: %d (impostazioni del processo). Colonna destra = muro esterno, sinistra = più interno. Clic su una cella per colorarla con il filamento selezionato, clic destro per il successivo."
+
+msgid "Layers in wall cycle: %d"
+msgstr "Strati nel ciclo dei muri: %d"
+
+msgid "Selected filament: %u"
+msgstr "Filamento selezionato: %u"
+
+msgid "repeat"
+msgstr "ripete"
 
 #~ msgid ""
 #~ "Improve shell precision by adjusting outer wall spacing. This also "

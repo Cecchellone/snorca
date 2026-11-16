@@ -126,16 +126,19 @@ unsigned int grouped_manual_pattern_infill_filament_1based(const LayerTools&  la
     if (grouped_id == 0)
         return 0;
 
-    const int innermost_perimeter_index = std::max(0, region.config().wall_loops.value - 1);
-    return layer_tools.mixed_mgr->resolve_perimeter(grouped_id,
-                                                    layer_tools.num_physical,
-                                                    layer_tools.layer_index,
-                                                    innermost_perimeter_index,
-                                                    float(layer_tools.print_z),
-                                                    float(layer_tools.layer_height),
-                                                    false,
-                                                    layer_tools.current_object,
-                                                    region.config().wall_loops.value);
+    MixedFeatureContext ctx;
+    ctx.wall_loops         = region.config().wall_loops.value;
+    ctx.top_layers         = region.config().top_shell_layers.value;
+    ctx.bottom_layers      = region.config().bottom_shell_layers.value;
+    ctx.object_layer_count = layer_tools.object_layer_count;
+    return layer_tools.mixed_mgr->resolve_feature(grouped_id,
+                                                  layer_tools.num_physical,
+                                                  layer_tools.layer_index,
+                                                  MixedFilamentManager::k_surface_feature,
+                                                  float(layer_tools.print_z),
+                                                  float(layer_tools.layer_height),
+                                                  ctx,
+                                                  layer_tools.current_object);
 }
 
 void remove_duplicates_preserve_order(std::vector<unsigned int> &values)
@@ -773,14 +776,18 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                     const unsigned int grouped_id =
                         grouped_manual_pattern_mixed_filament_id_for_layer(layer_tools, configured_wall);
                     if (grouped_id != 0) {
+                        MixedFeatureContext wall_ctx;
+                        wall_ctx.wall_loops         = region.config().wall_loops.value;
+                        wall_ctx.top_layers         = region.config().top_shell_layers.value;
+                        wall_ctx.bottom_layers      = region.config().bottom_shell_layers.value;
+                        wall_ctx.object_layer_count = int(object.layers().size());
                         const std::vector<unsigned int> ordered =
-                            m_mixed_mgr->ordered_perimeter_extruders(grouped_id,
-                                                                     m_num_physical,
-                                                                     layerCount,
-                                                                     float(layer->print_z),
-                                                                     float(layer->height),
-                                                                     false,
-                                                                     region.config().wall_loops.value);
+                            m_mixed_mgr->ordered_feature_extruders(grouped_id,
+                                                                   m_num_physical,
+                                                                   layerCount,
+                                                                   float(layer->print_z),
+                                                                   float(layer->height),
+                                                                   wall_ctx);
                         if (!ordered.empty()) {
                             if (ordered.size() >= 2)
                                 layer_tools.preserve_extruder_order = true;
