@@ -1914,8 +1914,10 @@ static bool local_z_eligible_mixed_row(const MixedFilament &mf)
     // resolved as A/B blends on model surfaces, not only custom rows.
     // Exclude explicit manual patterns and same-layer pointillism rows, which
     // have their own distribution semantics.
+    // Wall-dithered rows resolve per wall in G-code and must keep whole layers.
     return mf.enabled &&
            mf.manual_pattern.empty() &&
+           !MixedFilamentManager::uses_wall_dithering(mf) &&
            mf.distribution_mode != int(MixedFilament::SameLayerPointillisme);
 }
 

@@ -72,6 +72,17 @@ struct MixedFilament
     // Optional Local-Z cap for this mixed row. 0 disables the cap.
     int local_z_max_sublayers = 0;
 
+    // Wall dithering: resolve a different physical filament for every wall
+    // (perimeter) of the same layer.
+    // - With a grouped manual pattern (Cycle mode), each comma separated group
+    //   is one wall column: group 0 = outermost wall, last group = innermost.
+    //   Walls deeper than the last group reuse the last (deepest) group; groups
+    //   beyond the configured wall count are kept but ignored.
+    // - Without a manual pattern (Ratio / Match modes) the row's own layer
+    //   cadence is phase-shifted by `wall_dithering_shift` layers per wall.
+    bool wall_dithering       = false;
+    int  wall_dithering_shift = 1;
+
     static constexpr float k_default_gradient_dominant = 0.8f;  // Dominant component ratio
     static constexpr float k_default_gradient_minority = 0.2f;  // Minority component ratio
     static constexpr float k_min_gradient_difference   = 0.05f; // Minimum difference for valid gradient
@@ -122,6 +133,8 @@ struct MixedFilament
                pointillism_all_filaments == rhs.pointillism_all_filaments &&
                distribution_mode == rhs.distribution_mode &&
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
+               wall_dithering == rhs.wall_dithering &&
+               wall_dithering_shift == rhs.wall_dithering_shift &&
                gradient_enabled == rhs.gradient_enabled &&
                std::abs(gradient_start - rhs.gradient_start) <= k_gradient_epsilon &&
                std::abs(gradient_end   - rhs.gradient_end)   <= k_gradient_epsilon &&
@@ -316,6 +329,10 @@ public:
                          float        layer_height  = 0.f,
                          bool         force_height_weighted = false,
                          const PrintObject* current_object = nullptr) const;
+    // Resolve the physical filament of one wall. `perimeter_index` is 0 for the
+    // outermost wall. When `wall_loops` > 0 the index is clamped to the
+    // configured wall count so that walls beyond it (Arachne extras, etc.)
+    // reuse the innermost configured wall.
     unsigned int resolve_perimeter(unsigned int filament_id,
                                    size_t       num_physical,
                                    int          layer_index,
@@ -323,7 +340,14 @@ public:
                                    float        layer_print_z = 0.f,
                                    float        layer_height  = 0.f,
                                    bool         force_height_weighted = false,
-                                   const PrintObject* current_object = nullptr) const;
+                                   const PrintObject* current_object = nullptr,
+                                   int          wall_loops = 0) const;
+    // True when this row resolves a different filament per wall
+    // (wall dithering enabled with either a grouped manual pattern or the
+    // automatic per-wall phase shift).
+    static bool uses_wall_dithering(const MixedFilament &mf);
+    // Same as above, looked up by (virtual) filament id.
+    bool uses_wall_dithering(unsigned int filament_id, size_t num_physical) const;
     // Resolve the filament ID that should own painted regions on this layer.
     // Modes that require virtual identity later in G-code generation keep the
     // original mixed ID; ordinary mixed rows collapse to the current physical
@@ -342,12 +366,15 @@ public:
                                    float        layer_print_z = 0.f,
                                    float        layer_height  = 0.f,
                                    bool         force_height_weighted = false) const;
+    // Distinct physical extruders used by the walls of this layer, outermost
+    // wall first. Only the first `wall_loops` walls are considered (when > 0).
     std::vector<unsigned int> ordered_perimeter_extruders(unsigned int filament_id,
                                                           size_t       num_physical,
                                                           int          layer_index,
                                                           float        layer_print_z = 0.f,
                                                           float        layer_height  = 0.f,
-                                                          bool         force_height_weighted = false) const;
+                                                          bool         force_height_weighted = false,
+                                                          int          wall_loops = 0) const;
 
     // Map virtual filament ID (1-based, after physical IDs) to index into
     // m_mixed. Virtual IDs enumerate enabled mixed rows only.

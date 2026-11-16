@@ -4777,7 +4777,10 @@ static bool split_extrusion_collection_for_multi_perimeter_pattern(
     int                                                      layer_index,
     std::vector<std::unique_ptr<ExtrusionEntityCollection>>& out_by_extruder,
     size_t&                                                  out_bucket_count,
-    const PrintObject*                                       current_object = nullptr)
+    const PrintObject*                                       current_object = nullptr,
+    float                                                    layer_print_z  = 0.f,
+    float                                                    layer_height   = 0.f,
+    int                                                      wall_loops     = 0)
 {
     out_by_extruder.clear();
     out_by_extruder.resize(num_physical);
@@ -4797,7 +4800,7 @@ static bool split_extrusion_collection_for_multi_perimeter_pattern(
             perimeter_index = entity->role() == erExternalPerimeter ? 0 : 1;
 
         const unsigned int extruder_id = mixed_mgr.resolve_perimeter(
-            mixed_filament_id, num_physical, layer_index, perimeter_index, 0.f, 0.f, false, current_object);
+            mixed_filament_id, num_physical, layer_index, perimeter_index, layer_print_z, layer_height, false, current_object, wall_loops);
         if (extruder_id == 0 || extruder_id > num_physical)
             continue;
 
@@ -5608,8 +5611,7 @@ LayerResult GCode::process_layer(const Print& print,
             const MixedFilament* mixed_row = layer_tools.mixed_mgr->mixed_filament_from_id(filament_id_1based, layer_tools.num_physical);
             if (mixed_row == nullptr)
                 return false;
-            const std::string normalized_pattern = MixedFilamentManager::normalize_manual_pattern(mixed_row->manual_pattern);
-            return normalized_pattern.find(',') != std::string::npos;
+            return MixedFilamentManager::uses_wall_dithering(*mixed_row);
         };
 
         const unsigned int configured_filament_id = configured_filament_id_1based(entity_type, entities, region);
@@ -6156,7 +6158,10 @@ LayerResult GCode::process_layer(const Print& print,
                                                                                            layer_tools.layer_index,
                                                                                            split_by_extruder,
                                                                                            bucket_count,
-                                                                                           current_object_for_gradient)) {
+                                                                                           current_object_for_gradient,
+                                                                                           float(layer_tools.print_z),
+                                                                                           float(layer_tools.layer_height),
+                                                                                           region.config().wall_loops.value)) {
                                     if (bucket_count >= 2) {
                                         for (size_t extruder_idx = 0; extruder_idx < split_by_extruder.size(); ++extruder_idx) {
                                             std::unique_ptr<ExtrusionEntityCollection>& split_collection = split_by_extruder[extruder_idx];

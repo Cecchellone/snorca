@@ -79,8 +79,8 @@ bool has_grouped_manual_pattern(const MixedFilamentManager *mixed_mgr,
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
     if (mixed_row == nullptr)
         return false;
-    const std::string normalized = MixedFilamentManager::normalize_manual_pattern(mixed_row->manual_pattern);
-    return normalized.find(',') != std::string::npos;
+    // Per-wall (wall dithering) rows: grouped manual grid or automatic shift.
+    return MixedFilamentManager::uses_wall_dithering(*mixed_row);
 }
 
 void append_unique_preserve_order(std::vector<unsigned int> &dst, unsigned int value)
@@ -134,7 +134,8 @@ unsigned int grouped_manual_pattern_infill_filament_1based(const LayerTools&  la
                                                     float(layer_tools.print_z),
                                                     float(layer_tools.layer_height),
                                                     false,
-                                                    layer_tools.current_object);
+                                                    layer_tools.current_object,
+                                                    region.config().wall_loops.value);
 }
 
 void remove_duplicates_preserve_order(std::vector<unsigned int> &values)
@@ -777,7 +778,9 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                                                                      m_num_physical,
                                                                      layerCount,
                                                                      float(layer->print_z),
-                                                                     float(layer->height));
+                                                                     float(layer->height),
+                                                                     false,
+                                                                     region.config().wall_loops.value);
                         if (!ordered.empty()) {
                             if (ordered.size() >= 2)
                                 layer_tools.preserve_extruder_order = true;

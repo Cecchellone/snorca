@@ -66,10 +66,10 @@ unsigned int effective_infill_filament_id(const Layer &layer, const PrintRegionC
     if (mixed_row == nullptr)
         return filament_id;
 
-    const std::string normalized_pattern = MixedFilamentManager::normalize_manual_pattern(mixed_row->manual_pattern);
-    if (normalized_pattern.find(',') == std::string::npos)
+    if (!MixedFilamentManager::uses_wall_dithering(*mixed_row))
         return filament_id;
 
+    // Wall dithering: infill uses the innermost configured wall's filament.
     const int innermost_perimeter_index = std::max(0, config.wall_loops.value - 1);
     return mixed_mgr.resolve_perimeter(filament_id,
                                        num_physical,
@@ -78,7 +78,8 @@ unsigned int effective_infill_filament_id(const Layer &layer, const PrintRegionC
                                        float(layer.print_z),
                                        float(layer.height),
                                        false,
-                                       object);
+                                       object,
+                                       config.wall_loops.value);
 }
 
 } // namespace

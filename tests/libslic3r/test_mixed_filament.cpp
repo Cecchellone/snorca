@@ -663,6 +663,7 @@ TEST_CASE("Mixed filament perimeter resolver uses grouped manual patterns by ins
 
     MixedFilament &row = mgr.mixed_filaments().front();
     row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("12,21");
+    row.wall_dithering = true;
     REQUIRE(row.manual_pattern == "12,21");
 
     const unsigned int mixed_filament_id = 3;
@@ -696,6 +697,7 @@ TEST_CASE("Grouped manual perimeter patterns keep grouped resolution on collapse
 
     MixedFilament &row = mgr.mixed_filaments().front();
     row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("2,12");
+    row.wall_dithering = true;
     REQUIRE(row.manual_pattern == "2,12");
 
     const unsigned int mixed_filament_id = 3;
@@ -724,6 +726,7 @@ TEST_CASE("Grouped manual perimeter patterns resolve overlapping singleton inner
 
     MixedFilament &row = mgr.mixed_filaments().front();
     row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("12,1");
+    row.wall_dithering = true;
     REQUIRE(row.manual_pattern == "12,1");
 
     const unsigned int mixed_filament_id = 3;
@@ -755,6 +758,7 @@ TEST_CASE("Grouped manual wall patterns make infill follow the innermost perimet
 
     MixedFilament &row = mgr.mixed_filaments().front();
     row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("12,1");
+    row.wall_dithering = true;
     REQUIRE(row.manual_pattern == "12,1");
 
     PrintRegionConfig region_config = static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults());
@@ -791,6 +795,112 @@ TEST_CASE("Grouped manual wall patterns make infill follow the innermost perimet
     CHECK(layer1.sparse_infill_filament(overridden_region) == 1);
     CHECK(layer0.solid_infill_filament(overridden_region) == 1);
     CHECK(layer1.solid_infill_filament(overridden_region) == 1);
+}
+
+TEST_CASE("Wall dithering grid round-trips and legacy grouped patterns stay per-wall", "[MixedFilament][WallDithering]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FF80C0", "#FFFF80"};
+
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament &row = mgr.mixed_filaments().front();
+    row.manual_pattern       = MixedFilamentManager::normalize_manual_pattern("323,233");
+    row.wall_dithering       = true;
+    row.wall_dithering_shift = 3;
+
+    MixedFilamentManager loaded;
+    loaded.load_custom_entries(mgr.serialize_custom_entries(), colors);
+    REQUIRE(loaded.mixed_filaments().size() == 1);
+    CHECK(loaded.mixed_filaments().front().wall_dithering);
+    CHECK(loaded.mixed_filaments().front().wall_dithering_shift == 3);
+    CHECK(loaded.mixed_filaments().front().manual_pattern == "323,233");
+
+    // A serialized row without the explicit flag (older project) keeps the
+    // historical per-wall behaviour of grouped patterns.
+    MixedFilamentManager legacy;
+    legacy.load_custom_entries("1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u7,12,21", {"#000000", "#FFFFFF"});
+    REQUIRE(legacy.mixed_filaments().size() == 1);
+    CHECK(legacy.mixed_filaments().front().wall_dithering);
+    CHECK(legacy.mixed_filaments().front().manual_pattern == "12,21");
+
+    // Explicitly disabled flag must be honoured.
+    MixedFilamentManager disabled;
+    disabled.load_custom_entries("1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u7,dw0/1,12,21", {"#000000", "#FFFFFF"});
+    REQUIRE(disabled.mixed_filaments().size() == 1);
+    CHECK_FALSE(disabled.mixed_filaments().front().wall_dithering);
+    CHECK(disabled.mixed_filaments().front().manual_pattern == "12,21");
+}
+
+TEST_CASE("Wall dithering grid is ignored while the switch is off", "[MixedFilament][WallDithering]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament &row = mgr.mixed_filaments().front();
+    row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("1,2");
+    row.wall_dithering = false;
+
+    const unsigned int id = 3;
+    CHECK_FALSE(MixedFilamentManager::uses_wall_dithering(row));
+    // Every wall follows the plain layer cycle.
+    CHECK(mgr.resolve_perimeter(id, 2, 0, 0) == mgr.resolve(id, 2, 0));
+    CHECK(mgr.resolve_perimeter(id, 2, 0, 1) == mgr.resolve(id, 2, 0));
+    CHECK(mgr.ordered_perimeter_extruders(id, 2, 0).size() == 1);
+}
+
+TEST_CASE("Wall dithering limits columns to the configured wall count", "[MixedFilament][WallDithering]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FF80C0", "#FFFF80"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament &row = mgr.mixed_filaments().front();
+    // Outermost first: wall0 = 3, wall1 = 2, wall2 = 1.
+    row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("3,2,1");
+    row.wall_dithering = true;
+    const unsigned int id = 4;
+
+    // Two walls configured: the third column is remembered but unused.
+    CHECK(mgr.resolve_perimeter(id, 3, 0, 0, 0.f, 0.f, false, nullptr, 2) == 3);
+    CHECK(mgr.resolve_perimeter(id, 3, 0, 1, 0.f, 0.f, false, nullptr, 2) == 2);
+    CHECK(mgr.resolve_perimeter(id, 3, 0, 2, 0.f, 0.f, false, nullptr, 2) == 2);
+    const std::vector<unsigned int> two_walls = mgr.ordered_perimeter_extruders(id, 3, 0, 0.f, 0.f, false, 2);
+    REQUIRE(two_walls.size() == 2);
+    CHECK(two_walls[0] == 3);
+    CHECK(two_walls[1] == 2);
+
+    // Five walls configured: missing columns repeat the deepest one.
+    CHECK(mgr.resolve_perimeter(id, 3, 0, 3, 0.f, 0.f, false, nullptr, 5) == 1);
+    CHECK(mgr.resolve_perimeter(id, 3, 0, 4, 0.f, 0.f, false, nullptr, 5) == 1);
+    CHECK(mgr.ordered_perimeter_extruders(id, 3, 0, 0.f, 0.f, false, 5).size() == 3);
+}
+
+TEST_CASE("Automatic wall dithering phase shifts the layer cadence per wall", "[MixedFilament][WallDithering]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament &row = mgr.mixed_filaments().front();
+    row.manual_pattern.clear();
+    row.ratio_a = 1;
+    row.ratio_b = 1;
+    row.wall_dithering       = true;
+    row.wall_dithering_shift = 1;
+    const unsigned int id = 3;
+
+    REQUIRE(MixedFilamentManager::uses_wall_dithering(row));
+    for (int layer = 0; layer < 4; ++layer) {
+        CAPTURE(layer);
+        CHECK(mgr.resolve_perimeter(id, 2, layer, 0, 0.f, 0.f, false, nullptr, 3) == mgr.resolve(id, 2, layer));
+        CHECK(mgr.resolve_perimeter(id, 2, layer, 1, 0.f, 0.f, false, nullptr, 3) == mgr.resolve(id, 2, layer + 1));
+        CHECK(mgr.resolve_perimeter(id, 2, layer, 2, 0.f, 0.f, false, nullptr, 3) == mgr.resolve(id, 2, layer + 2));
+        CHECK(mgr.resolve_perimeter(id, 2, layer, 0, 0.f, 0.f, false, nullptr, 3) !=
+              mgr.resolve_perimeter(id, 2, layer, 1, 0.f, 0.f, false, nullptr, 3));
+    }
+    CHECK(mgr.ordered_perimeter_extruders(id, 2, 0, 0.f, 0.f, false, 3).size() == 2);
+
+    // Z gradients cannot be phase shifted per wall.
+    row.gradient_enabled = true;
+    CHECK_FALSE(MixedFilamentManager::uses_wall_dithering(row));
 }
 
 TEST_CASE("Local-Z plans follow repeated object and part filament changes", "[MixedFilament][LocalZ][Invalidation]")
@@ -1268,6 +1378,7 @@ TEST_CASE("Mixed filament painted-region resolver preserves virtual channels for
     using Catch::Matchers::WithinAbs;
     MixedFilament &row = mgr.mixed_filaments().front();
     row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("12,21");
+    row.wall_dithering = true;
     CHECK(mgr.effective_painted_region_filament_id(3, 2, 0) == 3);
     row.component_a_surface_offset = 0.02f;
     row.component_b_surface_offset = -0.02f;
@@ -3027,6 +3138,7 @@ TEST_CASE("RES-REGRESS-03: effective_painted_region_filament_id with Grouped mod
 
     MixedFilament &row = mgr.mixed_filaments().front();
     row.manual_pattern = MixedFilamentManager::normalize_manual_pattern("12,21");
+    row.wall_dithering = true;
     REQUIRE(row.manual_pattern == "12,21");
 
     const size_t num_physical = 3;

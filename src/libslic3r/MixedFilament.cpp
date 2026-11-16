@@ -390,7 +390,10 @@ static bool parse_row_definition(const std::string &row,
                                  bool              &gradient_enabled,
                                  float             &gradient_start,
                                  float             &gradient_end,
-                                 int               &cm_mode)
+                                 int               &cm_mode,
+                                 bool              &wall_dithering,
+                                 int               &wall_dithering_shift,
+                                 bool              &wall_dithering_present)
 {
     auto trim_copy = [](const std::string &s) {
         size_t lo = 0;
@@ -499,6 +502,9 @@ static bool parse_row_definition(const std::string &row,
     gradient_start = MixedFilament::k_default_gradient_dominant;
     gradient_end   = MixedFilament::k_default_gradient_minority;
     cm_mode        = -1;
+    wall_dithering         = false;
+    wall_dithering_shift   = 1;
+    wall_dithering_present = false;
 
     size_t token_idx = 5;
     if (tokens.size() >= 6) {
@@ -560,6 +566,22 @@ static bool parse_row_definition(const std::string &row,
                 }
                 continue;
             }
+        }
+        // Wall dithering token: "dw<flag>/<shift>". It starts with 'd' so that
+        // older builds parse it as an (invalid, ignored) deleted token instead
+        // of treating it as a pattern group.
+        if ((tok[0] == 'd' || tok[0] == 'D') && tok.size() >= 3 && (tok[1] == 'w' || tok[1] == 'W')) {
+            const std::string body  = tok.substr(2);
+            const size_t      slash = body.find('/');
+            int parsed_flag  = 0;
+            int parsed_shift = 1;
+            if (parse_int_token(body.substr(0, slash), parsed_flag)) {
+                wall_dithering         = parsed_flag != 0;
+                wall_dithering_present = true;
+                if (slash != std::string::npos && parse_int_token(body.substr(slash + 1), parsed_shift))
+                    wall_dithering_shift = std::clamp(parsed_shift, 0, 64);
+            }
+            continue;
         }
         if (tok[0] == 'd' || tok[0] == 'D') {
             int parsed_deleted = deleted ? 1 : 0;
@@ -2362,10 +2384,14 @@ std::string MixedFilamentManager::serialize_custom_entries()
            << 'u' << mf.stable_id;
         if (mf.ui_mode >= 0)
             ss << ",cm" << mf.ui_mode;
+        const std::string normalized_pattern = normalize_manual_pattern(mf.manual_pattern);
+        // Always emit the flag for grouped patterns: rows without it are
+        // treated as legacy (per-wall) on load.
+        if (mf.wall_dithering || normalized_pattern.find(',') != std::string::npos)
+            ss << ",dw" << (mf.wall_dithering ? 1 : 0) << '/' << std::clamp(mf.wall_dithering_shift, 0, 64);
         if (mf.gradient_enabled)
             ss << ",r1/" << float_to_string_decimal_point(mf.gradient_start, 4) << '/'
                << float_to_string_decimal_point(mf.gradient_end, 4);
-        const std::string normalized_pattern = normalize_manual_pattern(mf.manual_pattern);
         if (!normalized_pattern.empty())
             ss << ',' << normalized_pattern;
     }
@@ -2440,10 +2466,14 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         float gradient_start = 0.8f;
         float gradient_end   = 0.2f;
         int   cm_mode = -1;
+        bool  wall_dithering = false;
+        int   wall_dithering_shift = 1;
+        bool  wall_dithering_present = false;
         if (!parse_row_definition(row, a, b, stable_id, enabled, custom, origin_auto, mix, pointillism_all_filaments,
                                   gradient_component_ids, gradient_component_weights, manual_pattern, distribution_mode,
                                   local_z_max_sublayers, component_a_surface_offset, component_b_surface_offset, deleted,
-                                  gradient_enabled, gradient_start, gradient_end, cm_mode)) {
+                                  gradient_enabled, gradient_start, gradient_end, cm_mode,
+                                  wall_dithering, wall_dithering_shift, wall_dithering_present)) {
             ++skipped_rows;
             BOOST_LOG_TRIVIAL(warning) << "MixedFilamentManager::load_custom_entries invalid row format: " << row;
             continue;
@@ -2468,6 +2498,13 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
                                        << ", physical_count=" << n;
             continue;
         }
+
+        // Legacy projects: grouped (comma separated) manual patterns were
+        // always resolved per wall. Keep that behaviour by enabling wall
+        // dithering when the row predates the explicit flag.
+        if (!wall_dithering_present &&
+            normalize_manual_pattern(manual_pattern).find(',') != std::string::npos)
+            wall_dithering = true;
 
         if (!custom) {
             const uint64_t key = canonical_pair_key(a, b);
@@ -2514,6 +2551,8 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
             mf.gradient_enabled = gradient_enabled;
             mf.gradient_start   = gradient_start;
             mf.gradient_end     = gradient_end;
+            mf.wall_dithering       = wall_dithering;
+            mf.wall_dithering_shift = wall_dithering_shift;
             disable_pointillism_mode(mf);
 
             rebuilt.push_back(std::move(mf));
@@ -2550,6 +2589,8 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         mf.gradient_enabled = gradient_enabled;
         mf.gradient_start   = gradient_start;
         mf.gradient_end     = gradient_end;
+        mf.wall_dithering       = wall_dithering;
+        mf.wall_dithering_shift = wall_dithering_shift;
         disable_pointillism_mode(mf);
         rebuilt.push_back(std::move(mf));
         ++loaded_rows;
@@ -2659,6 +2700,27 @@ unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
     return (pos < mf.ratio_a) ? mf.component_a : mf.component_b;
 }
 
+bool MixedFilamentManager::uses_wall_dithering(const MixedFilament &mf)
+{
+    if (!mf.wall_dithering || mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
+        return false;
+    const std::string normalized = normalize_manual_pattern(mf.manual_pattern);
+    if (!normalized.empty())
+        // Manual grid: per-wall only when there is more than one wall column.
+        return normalized.find(',') != std::string::npos;
+    // Automatic per-wall phase shift. Z gradients are produced by the Local-Z
+    // planner and cannot be phase shifted per wall.
+    if (mf.gradient_enabled)
+        return false;
+    return mf.wall_dithering_shift > 0;
+}
+
+bool MixedFilamentManager::uses_wall_dithering(unsigned int filament_id, size_t num_physical) const
+{
+    const MixedFilament *mf = mixed_filament_from_id(filament_id, num_physical);
+    return mf != nullptr && uses_wall_dithering(*mf);
+}
+
 unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
                                                      size_t       num_physical,
                                                      int          layer_index,
@@ -2666,18 +2728,26 @@ unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
                                                      float        layer_print_z,
                                                      float        layer_height,
                                                      bool         force_height_weighted,
-                                                     const PrintObject* current_object) const
+                                                     const PrintObject* current_object,
+                                                     int          wall_loops) const
 {
     const int mixed_idx = mixed_index_from_filament_id(filament_id, num_physical);
     if (mixed_idx < 0)
         return filament_id;
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
+    if (!uses_wall_dithering(mf))
+        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
+
+    int wall_idx = std::max(0, perimeter_index);
+    if (wall_loops > 0)
+        wall_idx = std::min(wall_idx, wall_loops - 1);
+
     if (!mf.manual_pattern.empty()) {
         const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
         if (!pattern_groups.empty()) {
-            const size_t group_idx = size_t(std::max(0, perimeter_index));
-            const std::string &group = pattern_groups[std::min(group_idx, pattern_groups.size() - 1)];
+            // Walls deeper than the last defined column repeat the deepest one.
+            const std::string &group = pattern_groups[std::min(size_t(wall_idx), pattern_groups.size() - 1)];
             if (!group.empty()) {
                 const std::vector<std::string> tokens = split_pattern_group_to_tokens(group, num_physical);
                 if (!tokens.empty()) {
@@ -2688,9 +2758,19 @@ unsigned int MixedFilamentManager::resolve_perimeter(unsigned int filament_id,
                 }
             }
         }
+        return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
     }
 
-    return resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted, current_object);
+    // Automatic mode: phase shift the row's own layer cadence by
+    // `wall_dithering_shift` layers for every wall step inwards.
+    const int offset = wall_idx * std::max(0, mf.wall_dithering_shift);
+    return resolve(filament_id,
+                   num_physical,
+                   layer_index + offset,
+                   layer_print_z + float(offset) * layer_height,
+                   layer_height,
+                   force_height_weighted,
+                   current_object);
 }
 
 unsigned int MixedFilamentManager::effective_painted_region_filament_id(unsigned int filament_id,
@@ -2710,8 +2790,7 @@ unsigned int MixedFilamentManager::effective_painted_region_filament_id(unsigned
     if (mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
         return filament_id;
 
-    const std::string normalized_pattern = normalize_manual_pattern(mf.manual_pattern);
-    if (normalized_pattern.find(',') != std::string::npos)
+    if (uses_wall_dithering(mf))
         return filament_id;
 
     const bool is_custom_mixed = mf.custom;
@@ -2744,8 +2823,7 @@ float MixedFilamentManager::component_surface_offset(unsigned int filament_id,
     if (mixed_row->distribution_mode == int(MixedFilament::SameLayerPointillisme))
         return 0.f;
 
-    const std::string normalized_pattern = normalize_manual_pattern(mixed_row->manual_pattern);
-    if (normalized_pattern.find(',') != std::string::npos)
+    if (uses_wall_dithering(*mixed_row))
         return 0.f;
 
     const unsigned int resolved = resolve(filament_id,
@@ -2767,7 +2845,8 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
                                                                             int          layer_index,
                                                                             float        layer_print_z,
                                                                             float        layer_height,
-                                                                            bool         force_height_weighted) const
+                                                                            bool         force_height_weighted,
+                                                                            int          wall_loops) const
 {
     std::vector<unsigned int> ordered;
 
@@ -2778,26 +2857,34 @@ std::vector<unsigned int> MixedFilamentManager::ordered_perimeter_extruders(unsi
     }
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
-    if (!mf.manual_pattern.empty()) {
-        const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
-        if (!pattern_groups.empty()) {
-            ordered.reserve(pattern_groups.size());
-            for (size_t group_idx = 0; group_idx < pattern_groups.size(); ++group_idx) {
-                const unsigned int resolved = resolve_perimeter(filament_id,
-                                                                num_physical,
-                                                                layer_index,
-                                                                int(group_idx),
-                                                                layer_print_z,
-                                                                layer_height,
-                                                                force_height_weighted);
-                if (resolved < 1 || resolved > num_physical)
-                    continue;
-                if (std::find(ordered.begin(), ordered.end(), resolved) == ordered.end())
-                    ordered.emplace_back(resolved);
-            }
-            if (!ordered.empty())
-                return ordered;
+    if (uses_wall_dithering(mf)) {
+        size_t wall_count = 0;
+        if (!mf.manual_pattern.empty()) {
+            const size_t groups = split_manual_pattern_groups(mf.manual_pattern).size();
+            // Columns beyond the configured wall count are kept but unused;
+            // missing columns repeat the deepest one (no new extruder).
+            wall_count = wall_loops > 0 ? std::min(groups, size_t(wall_loops)) : groups;
+        } else {
+            wall_count = size_t(std::max(1, wall_loops));
         }
+        ordered.reserve(wall_count);
+        for (size_t wall_idx = 0; wall_idx < wall_count; ++wall_idx) {
+            const unsigned int resolved = resolve_perimeter(filament_id,
+                                                            num_physical,
+                                                            layer_index,
+                                                            int(wall_idx),
+                                                            layer_print_z,
+                                                            layer_height,
+                                                            force_height_weighted,
+                                                            nullptr,
+                                                            wall_loops);
+            if (resolved < 1 || resolved > num_physical)
+                continue;
+            if (std::find(ordered.begin(), ordered.end(), resolved) == ordered.end())
+                ordered.emplace_back(resolved);
+        }
+        if (!ordered.empty())
+            return ordered;
     }
 
     ordered.emplace_back(resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, force_height_weighted));

@@ -19203,6 +19203,51 @@ msgstr ""
 "aumentare in modo appropriato la temperatura del piano riscaldato può "
 "ridurre la probabilità di deformazione?"
 
+msgid "Wall dithering"
+msgstr "Dithering dei muri"
+
+msgid "Print every wall (perimeter) of a layer with its own filament. Only as many walls as set in the process \"Wall loops\" are used."
+msgstr "Stampa ogni muro (perimetro) di uno strato con un proprio filamento. Vengono usati solo tanti muri quanti indicati in \"Perimetri di stampa\" del processo."
+
+msgid "Layer shift per wall"
+msgstr "Sfasamento strati per muro"
+
+msgid "Each wall repeats the mix layer sequence shifted by this many layers relative to the next outer wall."
+msgstr "Ogni muro ripete la sequenza di strati del mix sfasata di questo numero di strati rispetto al muro immediatamente più esterno."
+
+msgid "Remove the top layer of the cycle"
+msgstr "Rimuovi lo strato più in alto del ciclo"
+
+msgid "Add a layer to the cycle"
+msgstr "Aggiungi uno strato al ciclo"
+
+msgid "Inner"
+msgstr "Interno"
+
+msgid "Outer"
+msgstr "Esterno"
+
+msgid "Not available with Z gradients: they are produced by Local-Z sub-layers."
+msgstr "Non disponibile con i gradienti in Z: sono prodotti dai sotto-strati Local-Z."
+
+msgid "Print each wall of the layer with a different filament of the mix."
+msgstr "Stampa ogni muro dello strato con un filamento diverso del mix."
+
+msgid "Walls used: %d (process \"Wall loops\"). Right column = outermost wall, left = innermost; bottom row = first layer of the cycle. Click a cell for the next filament, right-click for the previous one."
+msgstr "Muri usati: %d (\"Perimetri di stampa\" del processo). Colonna destra = muro più esterno, sinistra = più interno; riga in basso = primo strato del ciclo. Clic su una cella per il filamento successivo, clic destro per il precedente."
+
+msgid "Walls used: %d (process \"Wall loops\"). The mix sequence is shifted automatically for every wall. Preview: right = outermost wall, bottom = first layer."
+msgstr "Muri usati: %d (\"Perimetri di stampa\" del processo). La sequenza del mix viene sfasata automaticamente per ogni muro. Anteprima: destra = muro più esterno, in basso = primo strato."
+
+msgid "Layers in cycle: %d"
+msgstr "Strati nel ciclo: %d"
+
+msgid "  (%d extra walls kept, unused)"
+msgstr "  (%d muri extra conservati, non usati)"
+
+msgid "Comma separated wall groups require \"Wall dithering\" to be enabled."
+msgstr "I gruppi di muri separati da virgole richiedono che \"Dithering dei muri\" sia attivo."
+
 #~ msgid ""
 #~ "Improve shell precision by adjusting outer wall spacing. This also "
 #~ "improves layer consistency."

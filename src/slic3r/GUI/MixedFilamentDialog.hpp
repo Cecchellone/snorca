@@ -8,6 +8,8 @@
 #include <wx/dcbuffer.h>
 #include <wx/wrapsizer.h>
 #include <wx/clrpicker.h>
+#include <wx/checkbox.h>
+#include <wx/spinctrl.h>
 
 #include <set>
 #include <vector>
@@ -57,6 +59,21 @@ private:
     int max_filaments_for_mode(int mode_index) const;
     void collect_result();
     void draw_strip(wxDC& dc, wxPanel* panel);
+
+    // ---- Wall dithering (per-wall filament grid) ----
+    void build_wall_dithering_card(wxSizer* scroll_sizer);
+    void init_wall_dithering_from_result();
+    int  read_configured_wall_count() const;
+    bool wall_dithering_active() const;
+    void ensure_wall_grid();
+    void resize_wall_rows(int rows);
+    std::string wall_grid_to_pattern(size_t first_column, size_t column_count) const;
+    void sync_wall_grid_to_pattern_ctrl();
+    void update_wall_dithering_ui();
+    void refresh_wall_grid_panel();
+    void draw_wall_grid(wxDC& dc);
+    void on_wall_grid_click(const wxPoint& pt, bool backwards);
+    std::vector<std::vector<unsigned int>> compute_auto_wall_preview(int rows);
 
     static constexpr int MODE_RATIO    = 0;
     static constexpr int MODE_CYCLE    = 1;
@@ -184,6 +201,25 @@ private:
         std::vector<int> filament_indices; // combo index → actual filament index
     };
     std::vector<FilamentRow> m_filament_rows;
+
+    // Wall dithering state
+    class StaticBox*        m_wall_card             = nullptr;
+    wxBoxSizer*             m_wall_card_sizer       = nullptr;
+    wxCheckBox*             m_wall_check            = nullptr;
+    wxStaticText*           m_wall_info             = nullptr;
+    wxPanel*                m_wall_grid_panel       = nullptr;
+    wxPanel*                m_wall_cycle_controls   = nullptr;
+    wxStaticText*           m_wall_rows_label       = nullptr;
+    wxPanel*                m_wall_auto_controls    = nullptr;
+    wxSpinCtrl*             m_wall_shift_spin       = nullptr;
+    wxWindow*               m_pattern_input_wrapper = nullptr;
+    bool                    m_wall_dithering        = false;
+    int                     m_wall_shift            = 1;
+    int                     m_wall_count            = 1;
+    // Manual grid, stored outermost wall first: m_wall_grid[wall][layer] is a
+    // 1-based physical filament id. Columns beyond m_wall_count are kept in
+    // memory (and saved) but unused by the slicer.
+    std::vector<std::vector<unsigned int>> m_wall_grid;
 
     const std::vector<std::string>& m_filament_colours;
     Slic3r::MixedFilament            m_result;
