@@ -1,0 +1,22 @@
+name: Build Windows portable
+
+# Windows-only build (portable zip + installer artifacts) for feature
+# branches, without the Linux/macOS/Flatpak jobs of "Build all".
+on:
+  push:
+    branches:
+      - 'claude/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_windows:
+    name: Build Windows
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-2022
+      build-deps-only: false
+    secrets: inherit
